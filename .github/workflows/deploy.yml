@@ -1,0 +1,46 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      CONFIGURED: ${{ secrets.TS_OAUTH_CLIENT_ID != '' && secrets.DEPLOY_HOST != '' }}
+    steps:
+      - name: Skip when deploy secrets are missing
+        if: env.CONFIGURED != 'true'
+        run: echo "::notice::Deploy secrets are not configured for this repository, so the deploy was skipped."
+
+      - name: Connect to Tailscale
+        if: env.CONFIGURED == 'true'
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Deploy via SSH
+        if: env.CONFIGURED == 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=30 \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "~/deploy.sh noticebrd"
