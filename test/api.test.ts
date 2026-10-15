@@ -1,6 +1,7 @@
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ONLINE_WINDOW_MS } from "../server/hub";
+import { GOOGLE_FEED } from "./fixtures";
 import { codeFrom, createContext, openScreen, signIn, TestContext } from "./helpers";
 
 let ctx: TestContext;
@@ -299,5 +300,136 @@ describe("live updates", () => {
     await new Promise((r) => setTimeout(r, 80));
     expect(changes).toBe(1);
     unsubscribe();
+  });
+});
+
+describe("display modes", () => {
+  it("stores how a message moves and tells the screen", async () => {
+    const { owner, boardId } = await makeBoard();
+    const s = await pair(owner, boardId);
+    const { body } = await owner.agent.post(`/api/boards/${boardId}/messages`).send({ text: "Still", display: "whole" }).expect(201);
+    expect(body.message.display).toBe("whole");
+    await owner.agent.patch(`/api/boards/${boardId}/screens/${s.id}`).send({ messageId: body.message.id }).expect(200);
+    expect((await s.agent.post("/api/screen/status").send({}).expect(200)).body.message.display).toBe("whole");
+
+    await owner.agent.patch(`/api/boards/${boardId}/messages/${body.message.id}`).send({ display: "vertical" }).expect(200);
+    expect((await s.agent.post("/api/screen/status").send({}).expect(200)).body.message.display).toBe("vertical");
+
+    await owner.agent.patch(`/api/boards/${boardId}/messages/${body.message.id}`).send({ display: "diagonal" }).expect(400);
+    const plain = await owner.agent.post(`/api/boards/${boardId}/messages`).send({ text: "Default" }).expect(201);
+    expect(plain.body.message.display).toBe("horizontal");
+  });
+});
+
+describe("waking screens", () => {
+  it("tells the dashboard a screen is waiting for a tap", async () => {
+    const { owner, boardId } = await makeBoard();
+    const s = await pair(owner, boardId);
+    await s.agent.post("/api/screen/status").send({ awake: false, visible: true, needsTap: true }).expect(200);
+    let screen = (await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body.screens[0];
+    expect(screen).toMatchObject({ status: "open", needsTap: true });
+    await s.agent.post("/api/screen/status").send({ awake: true, visible: true }).expect(200);
+    screen = (await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body.screens[0];
+    expect(screen).toMatchObject({ status: "awake", needsTap: false });
+  });
+});
+
+describe("calendars", () => {
+  const FEED_URL = "https://calendar.google.com/calendar/ical/me/private-abc/basic.ics";
+  const at = (iso: string) => new Date(iso).getTime();
+
+  async function setUp() {
+    ctx.feeds.set(FEED_URL, GOOGLE_FEED);
+    ctx.clock.now = at("2026-10-15T09:00:00Z");
+    const { owner, boardId } = await makeBoard();
+    const door = await pair(owner, boardId, "Office door");
+    const lobby = await pair(owner, boardId, "Lobby");
+    const added = await owner.agent.post(`/api/boards/${boardId}/calendars`).send({ name: "My calendar", url: FEED_URL }).expect(201);
+    return { owner, boardId, door, lobby, calendarId: added.body.calendar.id as string };
+  }
+
+  it("turns away an address that isn't a calendar", async () => {
+    const { owner, boardId } = await makeBoard();
+    ctx.feeds.set("https://example.com/page", "<html>nope</html>");
+    const res = await owner.agent.post(`/api/boards/${boardId}/calendars`).send({ url: "https://example.com/page" }).expect(400);
+    expect(res.body.error).toMatch(/isn't an iCalendar feed/);
+    await owner.agent.post(`/api/boards/${boardId}/calendars`).send({ url: "http://insecure.example.com/a.ics" }).expect(400);
+    expect((await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body.calendars).toEqual([]);
+  });
+
+  it("shows a message during a meeting with a call link, then goes back to what the screen showed", async () => {
+    const { owner, boardId, door, lobby, calendarId } = await setUp();
+
+    const board = (await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body;
+    expect(board.calendars[0]).toMatchObject({ id: calendarId, name: "My calendar", error: null, source: "calendar.google.com/…/basic.ics" });
+    expect(board.calendars[0].upcoming[0]).toMatchObject({ title: "Weekly sync (moved)" });
+    expect(JSON.stringify(board.calendars)).not.toContain("private-abc");
+
+    // The lobby normally shows a welcome; the door shows nothing.
+    const welcome = await owner.agent.post(`/api/boards/${boardId}/messages`).send({ text: "Welcome" }).expect(201);
+    await owner.agent.patch(`/api/boards/${boardId}/screens/${lobby.id}`).send({ messageId: welcome.body.message.id }).expect(200);
+    const sign = await owner.agent
+      .post(`/api/boards/${boardId}/messages`)
+      .send({ text: "In a meeting", display: "whole", calendar: { enabled: true, calendarId, screenIds: [door.id] } })
+      .expect(201);
+    const signId = sign.body.message.id;
+
+    const showing = async (s: { agent: ReturnType<typeof request.agent> }) =>
+      (await s.agent.post("/api/screen/status").send({}).expect(200)).body.message?.text ?? null;
+
+    // Before the meeting.
+    await ctx.calendar.evaluateAll();
+    expect(await showing(door)).toBeNull();
+
+    // 14:15 Kampala: the moved weekly sync is on.
+    ctx.clock.now = at("2026-10-15T11:15:00Z");
+    await ctx.calendar.evaluateAll();
+    expect(await showing(door)).toBe("In a meeting");
+    expect(await showing(lobby)).toBe("Welcome"); // not one of its screens
+    const during = (await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body;
+    const signCard = during.messages.find((m: { id: string }) => m.id === signId);
+    expect(signCard.meeting).toMatchObject({ title: "Weekly sync (moved)", screenIds: [door.id] });
+    expect(signCard.calendar).toEqual({ enabled: true, calendarId, screenIds: [door.id] });
+    expect(during.screens.find((s: { id: string }) => s.id === door.id).meeting).toMatchObject({ messageId: signId });
+
+    // The meeting ends: back to black.
+    ctx.clock.now = at("2026-10-15T12:00:01Z");
+    await ctx.calendar.evaluateAll();
+    expect(await showing(door)).toBeNull();
+
+    // On all screens for the Zoom call at 16:00 UTC, then the lobby goes back to its welcome.
+    await owner.agent.patch(`/api/boards/${boardId}/messages/${signId}`).send({ calendar: { screenIds: null } }).expect(200);
+    ctx.clock.now = at("2026-10-15T16:10:00Z");
+    await ctx.calendar.evaluateAll();
+    expect(await showing(lobby)).toBe("In a meeting");
+    ctx.clock.now = at("2026-10-15T16:31:00Z");
+    await ctx.calendar.evaluateAll();
+    expect(await showing(lobby)).toBe("Welcome");
+  });
+
+  it("stops following a calendar when it's removed", async () => {
+    const { owner, boardId, door, calendarId } = await setUp();
+    const sign = await owner.agent
+      .post(`/api/boards/${boardId}/messages`)
+      .send({ text: "In a meeting", calendar: { enabled: true, calendarId } })
+      .expect(201);
+    ctx.clock.now = at("2026-10-15T11:15:00Z");
+    await ctx.calendar.evaluateAll();
+    expect((await door.agent.post("/api/screen/status").send({}).expect(200)).body.message.text).toBe("In a meeting");
+
+    await owner.agent.delete(`/api/boards/${boardId}/calendars/${calendarId}`).expect(204);
+    expect((await door.agent.post("/api/screen/status").send({}).expect(200)).body.message).toBeNull();
+    const board = (await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body;
+    expect(board.messages.find((m: { id: string }) => m.id === sign.body.message.id).calendar.enabled).toBe(false);
+  });
+
+  it("only lets a message follow its own board's calendars", async () => {
+    const { owner, boardId, calendarId } = await setUp();
+    const other = await owner.agent.post("/api/boards").send({ name: "Other" }).expect(201);
+    await owner.agent
+      .post(`/api/boards/${other.body.board.id}/messages`)
+      .send({ text: "x", calendar: { enabled: true, calendarId } })
+      .expect(400);
+    expect(boardId).toBeTruthy();
   });
 });

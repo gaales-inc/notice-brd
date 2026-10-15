@@ -28,13 +28,16 @@ interface Presence {
   awake: boolean;
   /** The page is in the foreground; a hidden page can't keep the screen on. */
   visible: boolean;
-  /** The status dashboards were last told about. */
-  reported: ScreenStatus;
+  /** The browser will only keep the screen on after someone taps it (Safari, each launch). */
+  needsTap: boolean;
+  /** What dashboards were last told, so they hear about changes only. */
+  reported: string;
 }
 
 export interface StatusReport {
   awake: boolean;
   visible: boolean;
+  needsTap?: boolean;
 }
 
 type ScreenListener = (event: string, data: unknown) => void;
@@ -115,13 +118,15 @@ export class Hub {
       lastSeen: 0,
       awake: false,
       visible: true,
-      reported: "offline" as ScreenStatus,
+      needsTap: false,
+      reported: "offline",
     };
     p.boardId = boardId;
     p.lastSeen = this.now();
     if (report) {
       p.awake = report.awake;
       p.visible = report.visible;
+      p.needsTap = report.needsTap === true;
     }
     this.presence.set(screenId, p);
     this.check(screenId, p);
@@ -149,6 +154,12 @@ export class Hub {
     return p ? this.compute(p) : "offline";
   }
 
+  /** Open but asleep-able only because nobody has tapped it yet. */
+  needsTap(screenId: string): boolean {
+    const p = this.presence.get(screenId);
+    return !!p && p.needsTap && this.compute(p) === "open";
+  }
+
   /** Epoch ms of the last heartbeat this process saw, if any. */
   lastSeen(screenId: string): number | null {
     const p = this.presence.get(screenId);
@@ -169,18 +180,22 @@ export class Hub {
     return p.awake && p.visible ? "awake" : "open";
   }
 
-  private check(screenId: string, p: Presence) {
+  private check(_screenId: string, p: Presence) {
     const status = this.compute(p);
-    if (status === p.reported) return;
-    p.reported = status;
+    const reported = status === "open" && p.needsTap ? "open:tap" : status;
+    if (reported === p.reported) return;
+    p.reported = reported;
     this.notifyBoard(p.boardId);
   }
 }
 
 /**
  * Starts a Server-Sent Events response. Cloudflare drops a response that sends
- * nothing for 100 s, so a comment goes out every 20 s; `no-transform` keeps
- * anything on the way from buffering or compressing the stream.
+ * nothing for 100 s, so a `ping` goes out every 20 s; `no-transform` keeps
+ * anything on the way from buffering or compressing the stream. The ping is an
+ * event rather than a comment because page script never sees comments, and
+ * the page needs it: a stream on a tablet woken from sleep can be dead while
+ * still reporting itself open, and silence is the only sign.
  */
 export function openStream(res: Response, onClose: () => void) {
   res.status(200);
@@ -191,7 +206,7 @@ export function openStream(res: Response, onClose: () => void) {
   res.flushHeaders();
   res.write("retry: 3000\n\n");
 
-  const ping = setInterval(() => res.write(": ping\n\n"), 20_000);
+  const ping = setInterval(() => res.write("event: ping\ndata: {}\n\n"), 20_000);
   res.on("close", () => {
     clearInterval(ping);
     onClose();

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { detectPlatform } from "../device";
 import { navigate } from "../router";
 import { Connection, ScreenState, cachedState, startScreen, unpairScreen } from "../screenClient";
 import { setMode } from "../storage";
@@ -44,6 +45,7 @@ export function ScreenPage() {
   const [connection, setConnection] = useState<Connection>("connecting");
   const [panel, setPanel] = useState(false);
   const [slow, setSlow] = useState(false);
+  const [updateReady, setUpdateReady] = useState(false);
   const hideTimer = useRef<number>();
   const wake = useWake();
 
@@ -51,7 +53,7 @@ export function ScreenPage() {
     setMode("screen");
     document.documentElement.classList.add("on-screen");
     keepAwake();
-    const stop = startScreen(setState, setConnection);
+    const stop = startScreen({ onState: setState, onConnection: setConnection, onUpdateReady: () => setUpdateReady(true) });
     const slowTimer = window.setTimeout(() => setSlow(true), 4000);
     return () => {
       stop();
@@ -86,12 +88,19 @@ export function ScreenPage() {
       {message && <Marquee message={message} class="marquee-full" />}
       {state && !state.paired && <Pairing state={state} />}
       {!state && slow && <p class="screen-note">{connection === "offline" ? "Can't reach NoticeBrd. Retrying…" : "Connecting…"}</p>}
-      {wake.needsTap && !panel && <p class="screen-note screen-tap">Tap the screen to keep it awake</p>}
+      {wake.needsTap && !panel && (
+        // The one thing a black screen shows: without this tap, it will sleep.
+        <div class={`tap-prompt${message ? " over-message" : ""}`}>
+          <p>Tap anywhere to keep this screen awake</p>
+          <p class="tap-why">This browser asks for a tap each time NoticeBrd opens.</p>
+        </div>
+      )}
       {panel && (
         <ScreenPanel
           state={state}
           connection={connection}
           wake={wake}
+          updateReady={updateReady}
           onKeep={showPanel}
           onUnpaired={(s) => {
             setState(s);
@@ -131,12 +140,14 @@ function ScreenPanel({
   state,
   connection,
   wake,
+  updateReady,
   onKeep,
   onUnpaired,
 }: {
   state: ScreenState | null;
   connection: Connection;
   wake: WakeState;
+  updateReady: boolean;
   onKeep: () => void;
   onUnpaired: (s: ScreenState) => void;
 }) {
@@ -161,6 +172,7 @@ function ScreenPanel({
       ? "Tap the screen to keep it awake"
       : "This browser can't keep the screen awake — turn off auto-lock in the device's settings";
   }
+  const apple = detectPlatform() === "ios" || detectPlatform() === "mac-safari";
 
   return (
     <div
@@ -190,6 +202,13 @@ function ScreenPanel({
         <dt>Awake</dt>
         <dd class={wake.active ? "ok" : "warn"}>{wakeText}</dd>
       </dl>
+      {apple && (
+        <p class="panel-tip">
+          A screen that stays on all day: also set <b>Settings → Display &amp; Brightness → Auto-Lock</b> to <b>Never</b>. iPhone and iPad
+          need one tap each time NoticeBrd is opened.
+        </p>
+      )}
+      {updateReady && <p class="panel-tip">A newer NoticeBrd is ready. It loads the next time the app opens, or now with Update.</p>}
       <div class="screen-panel-actions">
         {canFullscreen() && (
           <button
@@ -202,6 +221,17 @@ function ScreenPanel({
           >
             <Icon name="fullscreen" />
             <span>{isFullscreen() ? "Exit full screen" : "Full screen"}</span>
+          </button>
+        )}
+        {updateReady && (
+          <button
+            class="button primary"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.location.reload();
+            }}
+          >
+            <span>Update</span>
           </button>
         )}
         <InstallButton />

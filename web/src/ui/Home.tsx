@@ -1,23 +1,19 @@
 import { useEffect } from "preact/hooks";
 import { navigate } from "../router";
-import { getMode, setMode } from "../storage";
+import { setMode } from "../storage";
 import { Icon, InstallButton, Logo } from "./common";
 import { Marquee } from "./Marquee";
 
 /**
- * The front door. A device that has been used before goes straight back to
- * what it was — which is what the installed app opens — so a screen that
- * restarts lands on its board without anyone touching it.
+ * The front door, for a device that hasn't been used before. One that has
+ * goes straight back to what it was (`resolveStart`, before the first render)
+ * — which is what the installed app opens — so a screen that restarts lands
+ * on its board without anyone touching it.
  */
 export function Home() {
   useEffect(() => {
-    const mode = getMode();
-    if (mode === "screen") navigate("/screen", { replace: true });
-    else if (mode === "dashboard") navigate("/dashboard", { replace: true });
-    else document.title = "NoticeBrd";
+    document.title = "NoticeBrd";
   }, []);
-
-  if (getMode()) return null;
 
   return (
     <div class="home">

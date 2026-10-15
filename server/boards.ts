@@ -9,6 +9,7 @@ import { NextFunction, Response, Router } from "express";
 import {
   DEFAULT_STYLE,
   isColor,
+  isDisplay,
   isSize,
   isSpeed,
   MAX_BOARD_NAME,
@@ -16,6 +17,7 @@ import {
   MAX_SCREEN_NAME,
 } from "../shared/style";
 import { AuthedRequest, normalizeEmail, requireUser } from "./auth";
+import { CalendarSync, describeFeed, FeedError, Meeting, normalizeFeedUrl } from "./calendar";
 import { Mailer } from "./mailr";
 import { openStream } from "./hub";
 import { Live, normalizePairCode } from "./screens";
@@ -25,6 +27,20 @@ export const MAX_MEMBERS = 50;
 export const MAX_MESSAGES = 200;
 
 type Role = "owner" | "collaborator";
+
+interface MessageRow {
+  id: string;
+  text: string;
+  color: string;
+  speed: string;
+  size: string;
+  display: string;
+  auto_calendar: boolean;
+  auto_calendar_id: string | null;
+  auto_screen_ids: string[] | null;
+  created_at: Date;
+  updated_at: Date;
+}
 
 interface BoardRequest extends AuthedRequest {
   boardId?: string;
@@ -46,7 +62,9 @@ function cleanText(value: unknown): string | null {
   return text && text.length <= MAX_MESSAGE_LENGTH ? text : null;
 }
 
-export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router {
+export const MAX_CALENDARS = 10;
+
+export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calendar: CalendarSync): Router {
   const { db, hub } = live;
   const router = Router();
   router.use(requireUser(db));
@@ -107,7 +125,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
           screens: mine.length,
           awake: statuses.filter((s) => s === "awake").length,
           open: statuses.filter((s) => s !== "offline").length,
-          onAir: mine.filter((s) => s.message_id).length,
+          onAir: mine.filter((s) => s.message_id || live.override(s.id, b.id)).length,
         };
       }),
     });
@@ -144,7 +162,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
   /** The whole board as the dashboard draws it. */
   router.get("/boards/:boardId", onBoard, async (req: BoardRequest, res: Response) => {
     const boardId = req.boardId!;
-    const [{ rows: boards }, { rows: members }, { rows: messages }, { rows: screens }] = await Promise.all([
+    const [{ rows: boards }, { rows: members }, { rows: messages }, { rows: screens }, { rows: calendars }] = await Promise.all([
       db.query<{ id: string; name: string; created_at: Date }>("SELECT id, name, created_at FROM boards WHERE id = $1", [
         boardId,
       ]),
@@ -155,8 +173,8 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
           ORDER BY m.role = 'owner' DESC, m.added_at`,
         [boardId]
       ),
-      db.query<{ id: string; text: string; color: string; speed: string; size: string; created_at: Date; updated_at: Date }>(
-        `SELECT id, text, color, speed, size, created_at, updated_at
+      db.query<MessageRow>(
+        `SELECT id, text, color, speed, size, display, auto_calendar, auto_calendar_id, auto_screen_ids, created_at, updated_at
            FROM messages WHERE board_id = $1 ORDER BY created_at DESC`,
         [boardId]
       ),
@@ -165,28 +183,50 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
            FROM screens WHERE board_id = $1 ORDER BY paired_at, id`,
         [boardId]
       ),
+      db.query<{ id: string; name: string; url: string; fetched_at: Date | null; error: string | null; meetings: Meeting[] }>(
+        "SELECT id, name, url, fetched_at, error, meetings FROM calendars WHERE board_id = $1 ORDER BY created_at, id",
+        [boardId]
+      ),
     ]);
     const board = boards[0]!;
+    const overrides = new Map(screens.map((s) => [s.id, live.override(s.id, boardId)]));
+    const now = live.now();
 
     res.json({
       board: { id: board.id, name: board.name, createdAt: board.created_at },
       role: req.role,
       me: req.user!.id,
       members: members.map((m) => ({ userId: m.user_id, email: m.email, role: m.role, pending: m.pending })),
-      messages: messages.map((m) => ({
-        id: m.id,
-        text: m.text,
-        color: m.color,
-        speed: m.speed,
-        size: m.size,
-        createdAt: m.created_at,
-        updatedAt: m.updated_at,
-        screenIds: screens.filter((s) => s.message_id === m.id).map((s) => s.id),
-      })),
+      messages: messages.map((m) => {
+        const during = screens.filter((s) => overrides.get(s.id)?.messageId === m.id);
+        const meeting = during.length ? overrides.get(during[0]!.id)! : null;
+        return {
+          id: m.id,
+          text: m.text,
+          color: m.color,
+          speed: m.speed,
+          size: m.size,
+          display: m.display,
+          createdAt: m.created_at,
+          updatedAt: m.updated_at,
+          // Where it was broadcast. A meeting can cover some of these with another message for a while.
+          screenIds: screens.filter((s) => s.message_id === m.id).map((s) => s.id),
+          calendar: {
+            enabled: m.auto_calendar,
+            calendarId: m.auto_calendar_id,
+            screenIds: Array.isArray(m.auto_screen_ids) ? m.auto_screen_ids : null,
+          },
+          // Where a meeting has put it right now.
+          meeting: meeting
+            ? { title: meeting.title, end: new Date(meeting.end).toISOString(), screenIds: during.map((s) => s.id) }
+            : null,
+        };
+      }),
       screens: screens.map((s) => {
         const seen = hub.lastSeen(s.id);
         const stored = s.last_seen_at ? new Date(s.last_seen_at).getTime() : null;
         const lastSeen = Math.max(seen ?? 0, stored ?? 0);
+        const o = overrides.get(s.id);
         return {
           id: s.id,
           name: s.name,
@@ -194,7 +234,25 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
           messageId: s.message_id,
           pairedAt: s.paired_at,
           status: hub.status(s.id),
+          needsTap: hub.needsTap(s.id),
           lastSeenAt: lastSeen ? new Date(lastSeen).toISOString() : null,
+          meeting: o ? { messageId: o.messageId, title: o.title, end: new Date(o.end).toISOString() } : null,
+        };
+      }),
+      calendars: calendars.map((c) => {
+        const meetings = (c.meetings ?? []).filter((m) => m.end > now);
+        const current = meetings.find((m) => m.start <= now);
+        return {
+          id: c.id,
+          name: c.name,
+          source: describeFeed(c.url),
+          fetchedAt: c.fetched_at,
+          error: c.error,
+          now: current ? { title: current.title, end: new Date(current.end).toISOString() } : null,
+          upcoming: meetings
+            .filter((m) => m.start > now)
+            .slice(0, 3)
+            .map((m) => ({ title: m.title, start: new Date(m.start).toISOString(), end: new Date(m.end).toISOString() })),
         };
       }),
     });
@@ -230,17 +288,61 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
 
   // ------------------------------------------------------------------ messages
 
-  router.post("/boards/:boardId/messages", onBoard, async (req: BoardRequest, res: Response) => {
-    const text = cleanText(req.body?.text);
-    if (!text) {
-      res.status(400).json({ error: `Write a message of up to ${MAX_MESSAGE_LENGTH} characters.` });
-      return;
+  /**
+   * Reads the message fields a request sets (all of them when creating, any
+   * when editing) into column → value, or an error to answer with.
+   */
+  async function messageFields(boardId: string, body: Record<string, unknown>, creating: boolean): Promise<Record<string, unknown> | string> {
+    const out: Record<string, unknown> = {};
+    if (creating || body.text !== undefined) {
+      const text = cleanText(body.text);
+      if (!text) return `Write a message of up to ${MAX_MESSAGE_LENGTH} characters.`;
+      out.text = text;
     }
-    const color = req.body?.color ?? DEFAULT_STYLE.color;
-    const speed = req.body?.speed ?? DEFAULT_STYLE.speed;
-    const size = req.body?.size ?? DEFAULT_STYLE.size;
-    if (!isColor(color) || !isSpeed(speed) || !isSize(size)) {
-      res.status(400).json({ error: "That colour, speed or size isn't one NoticeBrd knows." });
+    for (const [field, valid] of [
+      ["color", isColor],
+      ["speed", isSpeed],
+      ["size", isSize],
+      ["display", isDisplay],
+    ] as const) {
+      const value = body[field] ?? (creating ? DEFAULT_STYLE[field] : undefined);
+      if (value === undefined) continue;
+      if (!valid(value)) return "That colour, speed, size or display isn't one NoticeBrd knows.";
+      out[field] = value;
+    }
+    const cal = body.calendar as { enabled?: unknown; calendarId?: unknown; screenIds?: unknown } | undefined;
+    if (cal !== undefined) {
+      if (typeof cal !== "object" || cal === null) return "Calendar settings aren't valid.";
+      if (cal.enabled !== undefined) out.auto_calendar = cal.enabled === true;
+      if (cal.calendarId !== undefined) {
+        if (cal.calendarId !== null) {
+          const ok =
+            typeof cal.calendarId === "string" &&
+            UUID.test(cal.calendarId) &&
+            (await db.query("SELECT 1 FROM calendars WHERE board_id = $1 AND id = $2", [boardId, cal.calendarId])).rows.length;
+          if (!ok) return "That calendar isn't on this board.";
+        }
+        out.auto_calendar_id = cal.calendarId;
+      }
+      if (cal.screenIds !== undefined) {
+        if (cal.screenIds !== null) {
+          const ids = cal.screenIds;
+          if (!Array.isArray(ids) || ids.length > 500 || !ids.every((id) => typeof id === "string" && UUID.test(id))) {
+            return "Choose the screens it should show on.";
+          }
+          out.auto_screen_ids = JSON.stringify([...new Set(ids)]);
+        } else out.auto_screen_ids = null;
+      }
+    }
+    return out;
+  }
+
+  const columnValue = (column: string, index: number) => (column === "auto_screen_ids" ? `$${index}::jsonb` : `$${index}`);
+
+  router.post("/boards/:boardId/messages", onBoard, async (req: BoardRequest, res: Response) => {
+    const fields = await messageFields(req.boardId!, req.body ?? {}, true);
+    if (typeof fields === "string") {
+      res.status(400).json({ error: fields });
       return;
     }
     const { rows: count } = await db.query<{ n: number }>("SELECT COUNT(*)::int AS n FROM messages WHERE board_id = $1", [
@@ -250,53 +352,44 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
       res.status(400).json({ error: `A board can keep up to ${MAX_MESSAGES} messages. Delete some old ones first.` });
       return;
     }
+    const columns = ["board_id", "created_by", ...Object.keys(fields)];
+    const values = [req.boardId, req.user!.id, ...Object.values(fields)];
     const { rows } = await db.query<{ id: string }>(
-      `INSERT INTO messages (board_id, text, color, speed, size, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [req.boardId, text, color, speed, size, req.user!.id]
+      `INSERT INTO messages (${columns.join(", ")}) VALUES (${columns.map((c, i) => columnValue(c, i + 1)).join(", ")}) RETURNING id`,
+      values
     );
     hub.notifyBoard(req.boardId!);
-    res.status(201).json({ message: { id: rows[0]!.id, text, color, speed, size } });
+    if (fields.auto_calendar) await live.evaluateCalendar(req.boardId!);
+    res.status(201).json({
+      message: { id: rows[0]!.id, text: fields.text, color: fields.color, speed: fields.speed, size: fields.size, display: fields.display },
+    });
   });
 
   router.patch("/boards/:boardId/messages/:messageId", onBoard, async (req: BoardRequest, res: Response) => {
-    const body = req.body ?? {};
-    const sets: string[] = [];
-    const params: unknown[] = [req.boardId, req.params.messageId];
-    if (body.text !== undefined) {
-      const text = cleanText(body.text);
-      if (!text) {
-        res.status(400).json({ error: `Write a message of up to ${MAX_MESSAGE_LENGTH} characters.` });
-        return;
-      }
-      params.push(text);
-      sets.push(`text = $${params.length}`);
+    if (!UUID.test(String(req.params.messageId))) {
+      res.status(404).json({ error: "Message not found" });
+      return;
     }
-    for (const [field, valid] of [
-      ["color", isColor],
-      ["speed", isSpeed],
-      ["size", isSize],
-    ] as const) {
-      if (body[field] === undefined) continue;
-      if (!valid(body[field])) {
-        res.status(400).json({ error: "That colour, speed or size isn't one NoticeBrd knows." });
-        return;
-      }
-      params.push(body[field]);
-      sets.push(`${field} = $${params.length}`);
+    const fields = await messageFields(req.boardId!, req.body ?? {}, false);
+    if (typeof fields === "string") {
+      res.status(400).json({ error: fields });
+      return;
     }
-    if (!sets.length || !UUID.test(String(req.params.messageId))) {
+    const columns = Object.keys(fields);
+    if (!columns.length) {
       res.status(400).json({ error: "Nothing to change." });
       return;
     }
     const { rows } = await db.query(
-      `UPDATE messages SET ${sets.join(", ")}, updated_at = NOW() WHERE board_id = $1 AND id = $2 RETURNING id`,
-      params
+      `UPDATE messages SET ${columns.map((c, i) => `${c} = ${columnValue(c, i + 3)}`).join(", ")}, updated_at = NOW()
+        WHERE board_id = $1 AND id = $2 RETURNING id`,
+      [req.boardId, req.params.messageId, ...Object.values(fields)]
     );
     if (!rows.length) {
       res.status(404).json({ error: "Message not found" });
       return;
     }
+    await live.evaluateCalendar(req.boardId!);
     await live.boardChanged(req.boardId!);
     res.json({ ok: true });
   });
@@ -308,6 +401,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
     }
     // Screens showing it go black (the foreign key sets their message to NULL).
     await db.query("DELETE FROM messages WHERE board_id = $1 AND id = $2", [req.boardId, req.params.messageId]);
+    await live.evaluateCalendar(req.boardId!);
     await live.boardChanged(req.boardId!);
     res.status(204).end();
   });
@@ -406,6 +500,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
       return;
     }
     hub.moved(screen.id, null, req.boardId!);
+    await live.evaluateCalendar(req.boardId!);
     await live.pushScreen(screen.id);
     res.status(201).json({ screen });
   });
@@ -471,6 +566,90 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string): Router
       return;
     }
     await live.unpair(screenId);
+    res.status(204).end();
+  });
+
+  // ----------------------------------------------------------------- calendars
+
+  /**
+   * Follows a calendar feed. It is fetched before it's kept, so an address
+   * that isn't a calendar is turned away with the reason.
+   */
+  router.post("/boards/:boardId/calendars", onBoard, async (req: BoardRequest, res: Response) => {
+    const name = cleanName(req.body?.name, MAX_BOARD_NAME) ?? "Calendar";
+    const url = normalizeFeedUrl(req.body?.url);
+    if (!url) {
+      res.status(400).json({ error: "Paste the calendar's secret iCal / ICS address — it starts with https:// or webcal://." });
+      return;
+    }
+    const { rows: count } = await db.query<{ n: number }>("SELECT COUNT(*)::int AS n FROM calendars WHERE board_id = $1", [
+      req.boardId,
+    ]);
+    if (count[0]!.n >= MAX_CALENDARS) {
+      res.status(400).json({ error: `A board can follow up to ${MAX_CALENDARS} calendars.` });
+      return;
+    }
+    const { rows } = await db.query<{ id: string }>(
+      "INSERT INTO calendars (board_id, name, url, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
+      [req.boardId, name, url, req.user!.id]
+    );
+    const id = rows[0]!.id;
+    try {
+      await calendar.sync(id);
+    } catch (err) {
+      await db.query("DELETE FROM calendars WHERE id = $1", [id]);
+      res.status(400).json({ error: err instanceof FeedError ? err.message : "Couldn't read that calendar." });
+      return;
+    }
+    hub.notifyBoard(req.boardId!);
+    res.status(201).json({ calendar: { id, name } });
+  });
+
+  const calendarOnBoard = async (req: BoardRequest, res: Response): Promise<string | null> => {
+    const id = String(req.params.calendarId);
+    const found = UUID.test(id) && (await db.query("SELECT 1 FROM calendars WHERE board_id = $1 AND id = $2", [req.boardId, id])).rows.length;
+    if (!found) {
+      res.status(404).json({ error: "Calendar not found" });
+      return null;
+    }
+    return id;
+  };
+
+  router.patch("/boards/:boardId/calendars/:calendarId", onBoard, async (req: BoardRequest, res: Response) => {
+    const id = await calendarOnBoard(req, res);
+    if (!id) return;
+    const name = cleanName(req.body?.name, MAX_BOARD_NAME);
+    if (!name) {
+      res.status(400).json({ error: `Give the calendar a name of up to ${MAX_BOARD_NAME} characters.` });
+      return;
+    }
+    await db.query("UPDATE calendars SET name = $2 WHERE id = $1", [id, name]);
+    hub.notifyBoard(req.boardId!);
+    res.json({ ok: true });
+  });
+
+  /** Fetches it again now, rather than within the next three minutes. */
+  router.post("/boards/:boardId/calendars/:calendarId/refresh", onBoard, async (req: BoardRequest, res: Response) => {
+    const id = await calendarOnBoard(req, res);
+    if (!id) return;
+    let error: string | null = null;
+    try {
+      await calendar.sync(id);
+    } catch (err) {
+      error = err instanceof FeedError ? err.message : "Couldn't read that calendar.";
+    }
+    hub.notifyBoard(req.boardId!);
+    res.json({ ok: !error, error });
+  });
+
+  router.delete("/boards/:boardId/calendars/:calendarId", onBoard, async (req: BoardRequest, res: Response) => {
+    const id = await calendarOnBoard(req, res);
+    if (!id) return;
+    // Messages that followed only this calendar stop following any.
+    await db.query("UPDATE messages SET auto_calendar = FALSE WHERE board_id = $1 AND auto_calendar_id = $2", [req.boardId, id]);
+    await db.query("DELETE FROM calendars WHERE id = $1", [id]);
+    await live.evaluateCalendar(req.boardId!);
+    hub.notifyBoard(req.boardId!);
     res.status(204).end();
   });
 

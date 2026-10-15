@@ -12,6 +12,7 @@ import { Request, Response, Router } from "express";
 import { newToken, sha256 } from "./auth";
 import { readCookie, SCREEN_COOKIE, setCookie } from "./cookies";
 import { Db, Queryable } from "./db";
+import type { CalendarOverride } from "./calendar";
 import { Hub, openStream } from "./hub";
 
 export const PAIR_CODE_TTL_MINUTES = 30;
@@ -27,6 +28,7 @@ export interface ScreenMessage {
   color: string;
   speed: string;
   size: string;
+  display: string;
 }
 
 /** Everything a screen needs to draw itself. */
@@ -54,11 +56,14 @@ interface ScreenRow {
   color: string | null;
   speed: string | null;
   size: string | null;
+  display: string | null;
 }
+
+const MESSAGE_FIELDS = "m.text, m.color, m.speed, m.size, m.display";
 
 const SCREEN_SELECT = `
   SELECT s.id, s.name, s.board_id, b.name AS board_name, s.pair_code, s.pair_expires_at,
-         m.id AS message_id, m.text, m.color, m.speed, m.size
+         m.id AS message_id, ${MESSAGE_FIELDS}
     FROM screens s
     LEFT JOIN boards b ON b.id = s.board_id
     LEFT JOIN messages m ON m.id = s.message_id`;
@@ -74,11 +79,47 @@ export function cleanDeviceName(value: unknown): string {
 
 /** Server state shared by the routers: the database, live connections and the build. */
 export class Live {
+  /**
+   * Screens a meeting is putting a message on right now (see calendar.ts).
+   * Kept apart from the screen's own message_id, which is what it goes back
+   * to when the meeting ends.
+   */
+  readonly overrides = new Map<string, CalendarOverride>();
+  /** Re-works out the board's meeting-driven messages; set once the calendar sync exists. */
+  evaluateCalendar: (boardId: string) => Promise<void> = async () => {};
+  /** The clock meetings are judged by. */
+  now: () => number = Date.now;
+
   constructor(
     readonly db: Db,
     readonly hub: Hub,
     readonly version: string
   ) {}
+
+  /** The override for a screen, if a meeting on its own board is putting a message on it. */
+  override(screenId: string, boardId: string | null): CalendarOverride | null {
+    const o = this.overrides.get(screenId);
+    return o && o.boardId === boardId ? o : null;
+  }
+
+  /** Puts meeting-driven messages in place of the screens' own. */
+  private async withOverrides(rows: ScreenRow[]): Promise<ScreenRow[]> {
+    const wanted = new Map<string, string>();
+    for (const row of rows) {
+      const o = this.override(row.id, row.board_id);
+      if (o) wanted.set(row.id, o.messageId);
+    }
+    if (!wanted.size) return rows;
+    const { rows: messages } = await this.db.query<ScreenRow & { id: string }>(
+      `SELECT m.id, ${MESSAGE_FIELDS} FROM messages m WHERE m.id IN (SELECT jsonb_array_elements_text($1::jsonb)::uuid)`,
+      [JSON.stringify([...new Set(wanted.values())])]
+    );
+    const byId = new Map(messages.map((m) => [m.id, m]));
+    return rows.map((row) => {
+      const m = byId.get(wanted.get(row.id) ?? "");
+      return m ? { ...row, message_id: m.id, text: m.text, color: m.color, speed: m.speed, size: m.size, display: m.display } : row;
+    });
+  }
 
   private toState(row: ScreenRow): ScreenState {
     const paired = row.board_id !== null;
@@ -91,14 +132,22 @@ export class Live {
       board: paired ? { name: row.board_name ?? "" } : null,
       message:
         row.message_id && row.text !== null
-          ? { id: row.message_id, text: row.text, color: row.color!, speed: row.speed!, size: row.size! }
+          ? {
+              id: row.message_id,
+              text: row.text,
+              color: row.color!,
+              speed: row.speed!,
+              size: row.size!,
+              display: row.display ?? "horizontal",
+            }
           : null,
     };
   }
 
   async screenState(screenId: string): Promise<ScreenState | null> {
     const { rows } = await this.db.query<ScreenRow>(`${SCREEN_SELECT} WHERE s.id = $1`, [screenId]);
-    return rows[0] ? this.toState(rows[0]) : null;
+    if (!rows[0]) return null;
+    return this.toState((await this.withOverrides(rows))[0]!);
   }
 
   async pushScreen(screenId: string) {
@@ -111,7 +160,9 @@ export class Live {
   async boardChanged(boardId: string) {
     this.hub.notifyBoard(boardId);
     const { rows } = await this.db.query<ScreenRow>(`${SCREEN_SELECT} WHERE s.board_id = $1`, [boardId]);
-    for (const row of rows) if (this.hub.isListening(row.id)) this.hub.sendScreen(row.id, "state", this.toState(row));
+    const listening = rows.filter((row) => this.hub.isListening(row.id));
+    if (!listening.length) return;
+    for (const row of await this.withOverrides(listening)) this.hub.sendScreen(row.id, "state", this.toState(row));
   }
 
   /** Gives an unpaired screen a fresh code. Codes are unique while they live. */
@@ -141,6 +192,7 @@ export class Live {
       [screenId]
     );
     await this.issuePairCode(screenId);
+    this.overrides.delete(screenId);
     this.hub.moved(screenId, rows[0]?.board_id ?? null, null);
     await this.pushScreen(screenId);
   }
@@ -226,7 +278,11 @@ export function screenRouter(live: Live): Router {
       return;
     }
     await db.query("UPDATE screens SET last_seen_at = NOW() WHERE id = $1", [screen.id]);
-    hub.seen(screen.id, screen.board_id, { awake: req.body?.awake === true, visible: req.body?.visible !== false });
+    hub.seen(screen.id, screen.board_id, {
+      awake: req.body?.awake === true,
+      visible: req.body?.visible !== false,
+      needsTap: req.body?.needsTap === true,
+    });
     res.json(await live.screenState(screen.id));
   });
 
