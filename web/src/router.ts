@@ -18,9 +18,24 @@ export function usePath(): string {
   useEffect(() => {
     const l = () => setPath(location.pathname);
     listeners.add(l);
+    // Children's effects run before their parent's, so a child that navigated
+    // on mount did so before this listener existed. Catch up with it here —
+    // missing it left the installed app blank whenever it opened on "/".
+    l();
     return () => void listeners.delete(l);
   }, []);
   return path;
+}
+
+/**
+ * Where "/" should go on this device: straight back to what it was last used
+ * as. Decided before the first render, so the installed app — which always
+ * opens on "/" — never renders a page only to leave it.
+ */
+export function resolveStart(mode: string | null) {
+  if (location.pathname !== "/") return;
+  if (mode === "screen") history.replaceState(null, "", "/screen");
+  else if (mode === "dashboard") history.replaceState(null, "", "/dashboard");
 }
 
 /** For <a href> clicks: plain clicks route in the page, modified ones open as usual. */

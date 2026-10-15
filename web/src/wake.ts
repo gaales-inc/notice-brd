@@ -1,18 +1,23 @@
-import { iosVersion } from "./device";
+import { detectPlatform, iosVersion } from "./device";
 import { isStandalone } from "./install";
 
 /**
  * Keeping the screen on while a board is showing.
  *
  * The Screen Wake Lock API does it in Chrome, Edge, Samsung Internet, Firefox
- * (126+) and Safari (16.4+). It is released whenever the page is hidden, so it
- * is taken again each time the page comes back.
+ * (126+) and Safari (16.4+; in home-screen apps from iOS 18.4). It is released
+ * whenever the page is hidden, and sometimes by the system while it isn't, so
+ * it is taken again whenever it drops.
  *
- * Where there is no wake lock — older Safari, older Firefox, and iOS home-screen
- * apps before 18.4, which grant the lock and then ignore it — a tiny silent
- * video plays on a loop instead: a playing video keeps any phone awake. A video
- * with sound may only start from a tap, so on those browsers the screen asks
- * for one.
+ * Safari grants the first lock in a page only from a tap. After that it lets
+ * the page take it again by itself — when the app comes back from the home
+ * screen, say — until the page is reloaded. So a screen on an iPhone or iPad
+ * needs one tap each time the app is opened, and asks for it plainly.
+ *
+ * Where there is no working wake lock — older Safari and Firefox, and iOS
+ * home-screen apps before 18.4, which grant the lock and then ignore it — a
+ * tiny silent video plays on a loop instead: a playing video keeps any phone
+ * awake. It, too, can only start from a tap.
  */
 
 export interface WakeState {
@@ -21,9 +26,12 @@ export interface WakeState {
   method: "lock" | "video" | null;
   /** Keeping it on needs a tap on the screen first. */
   needsTap: boolean;
+  /** Nothing this browser offers can keep it on; the device's own settings must. */
+  unsupported: boolean;
 }
 
 interface Sentinel extends EventTarget {
+  released?: boolean;
   release(): Promise<void>;
 }
 
@@ -32,29 +40,49 @@ const hasLock = !!nav.wakeLock;
 
 let wanted = false;
 let sentinel: Sentinel | null = null;
+/** The browser wants a tap before it grants the lock (Safari, once per page). */
+let lockNeedsTap = false;
+/** The lock failed for another reason: battery saver, a policy, an old engine. */
 let lockFailed = false;
+let requesting = false;
 let video: HTMLVideoElement | null = null;
 let videoPlaying = false;
 let videoBlocked = false;
+/** The browser can't play the video at all. */
+let videoFailed = false;
+let retryTimer: number | undefined;
+/** This browser wanted a tap before keeping the screen on — and will again after a reload. */
+let tapNeededOnLoad = false;
+/** When the screen was last tapped; a refusal soon after one means a tap doesn't help. */
+let lastTapAt = 0;
 const listeners = new Set<(s: WakeState) => void>();
 
-/** iOS home-screen apps before 18.4 hand out a wake lock that does nothing. */
+/**
+ * iOS home-screen apps before 18.4 hand out a wake lock that does nothing.
+ * Some home-screen apps don't say which iOS they run on; those get the video
+ * too, since a screen that sleeps is worse than one that plays a silent video.
+ */
 function lockIsHollow(): boolean {
+  if (detectPlatform() !== "ios" || !isStandalone()) return false;
   const v = iosVersion();
-  return v !== null && v < 18.04 && isStandalone();
+  return v === null || v < 18.04;
 }
 
 function needsVideo(): boolean {
   return !hasLock || lockFailed || lockIsHollow();
 }
 
+const visible = () => document.visibilityState !== "hidden";
+
 export function wakeState(): WakeState {
   const video = needsVideo();
-  const active = video ? videoPlaying : !!sentinel;
+  const active = video ? videoPlaying : !!sentinel && !sentinel.released;
+  const tapWouldHelp = video ? videoBlocked : lockNeedsTap;
   return {
     active,
     method: active ? (video ? "video" : "lock") : null,
-    needsTap: wanted && !active && video && videoBlocked && document.visibilityState === "visible",
+    needsTap: wanted && visible() && !active && tapWouldHelp,
+    unsupported: wanted && !active && video && !videoBlocked && videoFailed,
   };
 }
 
@@ -62,6 +90,9 @@ function emit() {
   const s = wakeState();
   listeners.forEach((l) => l(s));
 }
+
+/** A reload would leave the screen waiting for a tap before it stays awake again. */
+export const reloadCostsATap = () => tapNeededOnLoad;
 
 export function onWakeChange(listener: (s: WakeState) => void): () => void {
   listeners.add(listener);
@@ -90,10 +121,16 @@ function getVideo(): HTMLVideoElement {
   v.addEventListener("playing", () => {
     videoPlaying = true;
     videoBlocked = false;
+    // The lock already holds: no need to keep a video running.
+    if (!needsVideo() && sentinel && !sentinel.released) v.pause();
     emit();
   });
   v.addEventListener("pause", () => {
     videoPlaying = false;
+    emit();
+  });
+  v.addEventListener("error", () => {
+    videoFailed = true;
     emit();
   });
   document.body.appendChild(v);
@@ -111,62 +148,93 @@ function startVideo() {
   }
   if (attempt && typeof attempt.catch === "function") {
     attempt.catch(() => {
-      videoBlocked = true;
+      videoBlocked = tapNeededOnLoad = true;
       emit();
     });
   }
 }
 
-async function takeLock() {
-  if (!hasLock || sentinel || document.visibilityState !== "visible") return;
-  try {
-    const s = await nav.wakeLock!.request("screen");
-    sentinel = s;
-    lockFailed = false;
-    s.addEventListener("release", () => {
-      if (sentinel === s) sentinel = null;
+/**
+ * Asks for the lock. Called straight from a tap it carries the tap's
+ * permission, which is what Safari needs the first time. Refused even then,
+ * a tap won't help: the browser just won't, and the video takes over.
+ */
+function takeLock(fromTap = false) {
+  if (!hasLock || requesting || (sentinel && !sentinel.released) || !visible()) return;
+  requesting = true;
+  nav
+    .wakeLock!.request("screen")
+    .then((s) => {
+      sentinel = s;
+      lockNeedsTap = false;
+      lockFailed = false;
+      if (video && videoPlaying && !needsVideo()) video.pause();
+      s.addEventListener("release", () => {
+        if (sentinel === s) sentinel = null;
+        emit();
+        // Released while still showing (the system can do that): take it back.
+        if (wanted && visible()) scheduleRetry(1_000);
+      });
+    })
+    .catch((err: { name?: string }) => {
+      const afterTap = fromTap || Date.now() - lastTapAt < 3_000;
+      if (err && err.name === "NotAllowedError" && !afterTap) lockNeedsTap = tapNeededOnLoad = true;
+      else {
+        lockNeedsTap = false;
+        lockFailed = true;
+      }
+    })
+    .then(() => {
+      requesting = false;
+      if (needsVideo() && !videoPlaying) startVideo();
       emit();
     });
-  } catch {
-    // Battery saver, a permissions policy, or a browser wanting a tap first.
-    lockFailed = true;
-  }
 }
 
-async function acquire() {
-  if (!wanted || document.visibilityState !== "visible") return emit();
-  await takeLock();
-  if (needsVideo()) {
-    if (!videoPlaying) startVideo();
-  } else if (videoPlaying) {
-    // The lock came through after all; the video can stop.
-    video?.pause();
-  }
+function scheduleRetry(ms: number) {
+  window.clearTimeout(retryTimer);
+  retryTimer = window.setTimeout(acquire, ms);
+}
+
+function acquire() {
+  if (!wanted || !visible()) return emit();
+  takeLock();
+  if (needsVideo() && !videoPlaying && !videoBlocked) startVideo();
   emit();
 }
 
 export function keepAwake() {
   if (wanted) return;
   wanted = true;
-  void acquire();
+  acquire();
 }
 
 export function letSleep() {
   wanted = false;
+  window.clearTimeout(retryTimer);
   void sentinel?.release().catch(() => undefined);
   sentinel = null;
   video?.pause();
   emit();
 }
 
-/** Call from every tap on the screen: some browsers only grant either way after one. */
+/** Call from every tap on the screen: Safari only grants the lock, and any browser a video, after one. */
 export function nudge() {
   if (!wanted) return;
-  if (needsVideo() && !videoPlaying) startVideo();
-  if (!sentinel) void acquire();
+  lastTapAt = Date.now();
+  // The video can only start here, inside the tap. Start it whenever the lock
+  // isn't holding yet: if the lock then comes through, the video stops again.
+  if (!wakeState().active && (needsVideo() || lockNeedsTap) && !videoPlaying) startVideo();
+  takeLock(true);
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") void acquire();
+  if (visible()) acquire();
   else emit();
 });
+window.addEventListener("pageshow", () => acquire());
+window.addEventListener("focus", () => acquire());
+// A lock can lapse without an event on some engines; check now and then.
+window.setInterval(() => {
+  if (wanted && visible() && !wakeState().active) acquire();
+}, 30_000);

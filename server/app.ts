@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "fs";
 import path from "path";
 import { authRouter } from "./auth";
 import { boardsRouter } from "./boards";
+import { CalendarSync, FeedFetcher, fetchFeed } from "./calendar";
 import { Db } from "./db";
 import { Hub } from "./hub";
 import { Mailer } from "./mailr";
@@ -19,6 +20,10 @@ export interface AppOptions {
   /** Off in tests, which sign in more often than any person would. */
   rateLimits?: boolean;
   codeCooldownSeconds?: number;
+  /** How calendar feeds are fetched (tests serve their own). */
+  fetchCalendar?: FeedFetcher;
+  /** The clock meetings are judged by (tests move it). */
+  now?: () => number;
 }
 
 /** The build id written next to index.html; screens on an older build reload. */
@@ -39,10 +44,15 @@ export function createApp({
   appUrl = "https://noticebrd.gaales.com",
   rateLimits = true,
   codeCooldownSeconds = 30,
+  fetchCalendar = fetchFeed,
+  now = Date.now,
 }: AppOptions) {
   const app = express();
   webDir = webDir && path.resolve(webDir);
   const live = new Live(db, hub, readVersion(webDir));
+  live.now = now;
+  const calendar = new CalendarSync(live, fetchCalendar, now);
+  live.evaluateCalendar = (boardId) => calendar.evaluate(boardId);
   app.disable("x-powered-by");
   app.use(securityHeaders);
 
@@ -65,6 +75,8 @@ export function createApp({
     // Pair codes are guessable in principle; this keeps it to principle.
     app.use(/^\/api\/boards\/[^/]+\/screens$/, rateLimit({ windowMs: 15 * 60 * 1000, max: 30 }));
     app.use(/^\/api\/boards\/[^/]+\/members$/, rateLimit({ windowMs: 60 * 60 * 1000, max: 30 }));
+    // Adding or refreshing a calendar makes the server fetch someone else's URL.
+    app.use(/^\/api\/boards\/[^/]+\/calendars(\/[^/]+\/refresh)?$/, rateLimit({ windowMs: 60 * 60 * 1000, max: 60 }));
   }
 
   app.use("/api", sameOrigin);
@@ -75,7 +87,7 @@ export function createApp({
 
   app.use("/api/auth", authRouter(db, mailer, codeCooldownSeconds));
   app.use("/api/screen", screenRouter(live));
-  app.use("/api", boardsRouter(live, mailer, appUrl.replace(/\/+$/, "")));
+  app.use("/api", boardsRouter(live, mailer, appUrl.replace(/\/+$/, ""), calendar));
   app.use("/api", (_req: Request, res: Response) => {
     res.status(404).json({ error: "Not found" });
   });
@@ -124,5 +136,5 @@ export function createApp({
     if (!res.headersSent) res.status(500).json({ error: "Something went wrong" });
   });
 
-  return { app, live };
+  return { app, live, calendar };
 }

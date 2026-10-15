@@ -1,6 +1,7 @@
 import { render } from "preact";
 import "./styles.css";
-import { usePath } from "./router";
+import { resolveStart, usePath } from "./router";
+import { getMode } from "./storage";
 import { Toaster } from "./ui/common";
 import { Dashboard } from "./ui/Dashboard";
 import { Home } from "./ui/Home";
@@ -20,6 +21,7 @@ function App() {
   );
 }
 
+resolveStart(getMode());
 render(<App />, document.getElementById("app")!);
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {

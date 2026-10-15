@@ -279,6 +279,29 @@ textarea {
   color: var(--text);
 }
 
+/*
+ * Selects draw their own arrow. The native one sits wherever each browser
+ * puts it — Safari's hugs the right edge — so it is hidden, and a chevron is
+ * placed 14px in from the edge with the text kept clear of it. Every select
+ * gets this, so no new one can come out cramped.
+ */
+select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 42px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23b4b4bd' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 16px 16px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+select::-ms-expand {
+  display: none;
+}
+
 input:focus,
 select:focus,
 textarea:focus {
@@ -941,7 +964,8 @@ textarea {
   overflow: hidden;
 }
 
-.message-led .marquee {
+.message-led .marquee,
+.message-led .whole {
   height: 64px;
   position: relative;
   margin: -12px -14px;
@@ -1231,14 +1255,105 @@ textarea {
   }
 }
 
+/* Scrolling up: the strip is a box-height spacer and then the wrapped text. */
+.marquee-v {
+  display: block;
+}
+
+.vscroll-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 0 6%;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  font-family: var(--font);
+  font-weight: 800;
+  line-height: 1.18;
+  visibility: hidden;
+  -webkit-transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+}
+
+.vscroll-strip.running {
+  visibility: visible;
+  -webkit-animation: vscroll linear infinite;
+  animation: vscroll linear infinite;
+}
+
+@-webkit-keyframes vscroll {
+  from {
+    -webkit-transform: translate3d(0, 0, 0);
+  }
+  to {
+    -webkit-transform: translate3d(0, -100%, 0);
+  }
+}
+
+@keyframes vscroll {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(0, -100%, 0);
+  }
+}
+
+/* All at once: centred, as large as fits. */
+.whole {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4% 5%;
+  overflow: hidden;
+  background: #000;
+  pointer-events: none;
+}
+
+.whole-text {
+  max-width: 100%;
+  text-align: center;
+  font-family: var(--font);
+  font-weight: 800;
+  line-height: 1.12;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.whole-text.break {
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-word;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  /* The dashboard's previews hold still; a screen is a ticker by request. */
+  /* The dashboard's previews hold still; a screen moves by request. */
   .preview .marquee-strip.running,
   .message-led .marquee-strip.running,
   .home-hero .marquee-strip.running {
     -webkit-animation-duration: 0s !important;
     animation: none;
     padding-left: 16px;
+  }
+
+  .preview .vscroll-strip.running,
+  .message-led .vscroll-strip.running {
+    animation: none;
+  }
+
+  .preview .vscroll-strip > div:first-child,
+  .message-led .vscroll-strip > div:first-child {
+    display: none;
   }
 }
 
@@ -1253,10 +1368,60 @@ textarea {
   font-size: 4vmin;
 }
 
-.screen-tap {
+.tap-prompt {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  top: 50%;
+  -webkit-transform: translateY(-50%);
+  transform: translateY(-50%);
+  text-align: center;
+  color: #a1a1aa;
+  pointer-events: none;
+}
+
+.tap-prompt p {
+  margin: 0;
+  font-size: 5vmin;
+  font-weight: 650;
+}
+
+.tap-prompt .tap-why {
+  margin-top: 1.5vmin;
+  font-size: 2.6vmin;
+  font-weight: 400;
+  color: #71717a;
+}
+
+/* Over a running message the prompt sits in a band at the foot instead. */
+.tap-prompt.over-message {
   top: auto;
-  bottom: 6vmin;
-  font-size: 3.2vmin;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  -webkit-transform: none;
+  transform: none;
+  padding: 2.5vmin 4vmin;
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.tap-prompt.over-message p {
+  font-size: 3.4vmin;
+}
+
+.panel-tip {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #1c1c20;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.panel-tip b {
+  color: var(--text);
+  font-weight: 600;
 }
 
 .pairing {
@@ -1407,4 +1572,155 @@ textarea {
     padding-bottom: calc(20px + env(safe-area-inset-bottom));
     max-height: 92vh;
   }
+}
+
+/* ------------------------------------------------------------ calendars */
+
+.auto-cal {
+  padding: 10px 2px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.check.disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.check.indent {
+  margin-left: 30px;
+}
+
+.auto-cal-options {
+  margin: 4px 0 0 30px;
+}
+
+.auto-cal-options .field.compact {
+  margin: 10px 0 4px;
+  gap: 8px;
+}
+
+.auto-cal-note {
+  margin: 6px 0 0 30px;
+}
+
+.auto-cal-options .auto-cal-note {
+  margin-left: 0;
+}
+
+.cal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 10px;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.cal-chip .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 0;
+}
+
+.meeting-row {
+  margin: 8px 0 0 20px;
+  line-height: 1.6;
+}
+
+.meeting-row .on-air-badge {
+  margin-right: 4px;
+}
+
+.screen-note-row {
+  margin: 6px 0 0 20px;
+}
+
+.calendar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.calendar-list li {
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.calendar-list li:first-child {
+  border-top: 0;
+  padding-top: 4px;
+}
+
+.calendar-list p {
+  margin: 4px 0 0 26px;
+}
+
+.calendar-list .row-actions {
+  margin: 6px 0 0 26px;
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cal-head .icon {
+  color: var(--accent);
+  width: 18px;
+  height: 18px;
+}
+
+.cal-name {
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-source {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-checked {
+  margin-right: auto;
+}
+
+.how-to {
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.how-to summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.how-to dl {
+  margin: 10px 0 2px;
+}
+
+.how-to dt {
+  font-weight: 650;
+  margin-top: 10px;
+}
+
+.how-to dd {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
 }

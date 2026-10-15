@@ -119,6 +119,8 @@ const PATHS: Record<string, string> = {
   person: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
   signout: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10",
   unlink: "M9 15l6-6M10 6l1-1a4 4 0 016 6l-1 1M14 18l-1 1a4 4 0 01-6-6l1-1",
+  calendar: "M4 6h16v14H4zM4 10h16M8 3v4M16 3v4",
+  refresh: "M20 12a8 8 0 11-2.3-5.6M20 4v5h-5",
 };
 
 export function Icon({ name }: { name: keyof typeof PATHS | string }) {

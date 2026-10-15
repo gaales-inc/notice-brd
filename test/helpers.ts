@@ -10,8 +10,11 @@ export interface TestContext {
   app: ReturnType<typeof createApp>["app"];
   db: Db;
   hub: Hub;
+  calendar: ReturnType<typeof createApp>["calendar"];
   mails: Mail[];
   clock: { now: number };
+  /** Calendar feeds by address, served to the app instead of fetching them. */
+  feeds: Map<string, string>;
 }
 
 /** The production SQL on an in-process Postgres: no server, no Docker. */
@@ -21,7 +24,8 @@ export async function createContext(): Promise<TestContext> {
   const mails: Mail[] = [];
   const clock = { now: Date.now() };
   const hub = new Hub(() => clock.now);
-  const { app } = createApp({
+  const feeds = new Map<string, string>();
+  const { app, calendar } = createApp({
     db,
     hub,
     mailer: async (mail) => {
@@ -29,8 +33,14 @@ export async function createContext(): Promise<TestContext> {
     },
     rateLimits: false,
     codeCooldownSeconds: 0,
+    now: () => clock.now,
+    fetchCalendar: async (url) => {
+      const feed = feeds.get(url);
+      if (feed === undefined) throw new Error("not found");
+      return feed;
+    },
   });
-  return { app, db, hub, mails, clock };
+  return { app, db, hub, calendar, mails, clock, feeds };
 }
 
 export function codeFrom(mails: Mail[], email: string): string {

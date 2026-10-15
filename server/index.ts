@@ -35,7 +35,8 @@ async function main() {
   // Built to dist/server/server/index.js, beside the web app in dist/web. In
   // development Vite serves the web app and this stays unset.
   const webDir = process.env.WEB_DIR || (process.env.NODE_ENV === "production" ? path.resolve(__dirname, "../../web") : undefined);
-  const { app, live } = createApp({ db, mailer: sendMail, hub, webDir, appUrl: process.env.APP_URL });
+  const { app, live, calendar } = createApp({ db, mailer: sendMail, hub, webDir, appUrl: process.env.APP_URL });
+  calendar.start();
 
   const port = Number(process.env.PORT || 3000);
   const server = app.listen(port, () => {
@@ -48,6 +49,7 @@ async function main() {
 
   const shutdown = () => {
     hub.stop();
+    calendar.stop();
     server.close();
     server.closeAllConnections();
     void db.close().finally(() => process.exit(0));

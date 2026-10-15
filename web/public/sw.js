@@ -5,7 +5,12 @@
 // Pages are network-first (a deploy shows up on the next load); hashed assets
 // are cache-first, since a hash never changes content. /api is never cached.
 
-const CACHE = "noticebrd-shell-v1";
+const CACHE = "noticebrd-shell-v2";
+// A phone or tablet woken from sleep can sit on a dead connection for a long
+// time before a request fails. The page isn't worth waiting that long for:
+// after this, the cached copy opens and the network copy, if it comes, is kept
+// for next time.
+const NAVIGATION_TIMEOUT_MS = 4000;
 
 self.addEventListener("install", (event) => {
   // The first visit loads its assets before this worker controls the page, so
@@ -38,16 +43,44 @@ self.addEventListener("fetch", (event) => {
   if (request.headers.has("range") || url.pathname === "/version.txt") return;
 
   if (request.mode === "navigate") {
+    const network = fetch(request).then((response) => {
+      if (response.ok) {
+        const copy = response.clone();
+        event.waitUntil(caches.open(CACHE).then((cache) => cache.put("/", copy)));
+      }
+      return response;
+    });
     event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            caches.open(CACHE).then((cache) => cache.put("/", copy));
-          }
-          return response;
-        })
-        .catch(() => caches.match("/")),
+      new Promise((resolve) => {
+        let settled = false;
+        const fallback = () =>
+          caches.match("/").then((cached) => {
+            if (settled) return;
+            if (cached) {
+              settled = true;
+              resolve(cached);
+            }
+          });
+        const timer = setTimeout(fallback, NAVIGATION_TIMEOUT_MS);
+        network
+          .then((response) => {
+            clearTimeout(timer);
+            if (!settled) {
+              settled = true;
+              resolve(response);
+            }
+          })
+          .catch(() => {
+            clearTimeout(timer);
+            fallback().then(() => {
+              // Nothing cached either: let the browser show its own offline page.
+              if (!settled) {
+                settled = true;
+                resolve(Response.error());
+              }
+            });
+          });
+      }),
     );
     return;
   }

@@ -76,5 +76,31 @@ export async function migrate(db: Db): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS screens_board ON screens(board_id);
     CREATE INDEX IF NOT EXISTS screens_message ON screens(message_id);
+
+    -- How a message moves: 'horizontal' (across), 'vertical' (up), 'whole' (still).
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS display TEXT NOT NULL DEFAULT 'horizontal';
+
+    -- A calendar feed (an iCalendar address) whose meetings can put messages
+    -- on screens. meetings caches the occurrences around now that carry a call
+    -- link, so meetings start and end on time between fetches.
+    CREATE TABLE IF NOT EXISTS calendars (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      board_id UUID NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      fetched_at TIMESTAMPTZ,
+      error TEXT,
+      meetings JSONB NOT NULL DEFAULT '[]'::jsonb
+    );
+    CREATE INDEX IF NOT EXISTS calendars_board ON calendars(board_id);
+
+    -- A message can show by itself during meetings with a call link: on one
+    -- calendar (auto_calendar_id) or any of the board's (NULL), on some
+    -- screens (auto_screen_ids, a JSON array) or all of them (NULL).
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS auto_calendar BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS auto_calendar_id UUID REFERENCES calendars(id) ON DELETE SET NULL;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS auto_screen_ids JSONB;
   `);
 }
