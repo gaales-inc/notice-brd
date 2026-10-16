@@ -27,6 +27,9 @@ export type Display = (typeof DISPLAYS)[number];
 
 export const DEFAULT_STYLE = { color: "#ffd60a", speed: "normal" as Speed, size: "medium" as Size, display: "horizontal" as Display };
 
+/** At or below this, a screen that isn't charging is flagged in the dashboard. */
+export const LOW_BATTERY_PERCENT = 20;
+
 export const MAX_MESSAGE_LENGTH = 500;
 export const MAX_BOARD_NAME = 60;
 export const MAX_SCREEN_NAME = 40;

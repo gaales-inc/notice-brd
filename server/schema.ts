@@ -102,5 +102,13 @@ export async function migrate(db: Db): Promise<void> {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS auto_calendar BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS auto_calendar_id UUID REFERENCES calendars(id) ON DELETE SET NULL;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS auto_screen_ids JSONB;
+
+    -- The screen's battery as it last reported it. battery_source is 'battery'
+    -- (level and charging are set), 'none' (no battery: a TV, a desktop) or
+    -- 'unavailable' (the browser won't say: Safari, Firefox); NULL before any report.
+    ALTER TABLE screens ADD COLUMN IF NOT EXISTS battery_level SMALLINT;
+    ALTER TABLE screens ADD COLUMN IF NOT EXISTS battery_charging BOOLEAN;
+    ALTER TABLE screens ADD COLUMN IF NOT EXISTS battery_source TEXT;
+    ALTER TABLE screens ADD COLUMN IF NOT EXISTS battery_at TIMESTAMPTZ;
   `);
 }

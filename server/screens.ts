@@ -198,6 +198,25 @@ export class Live {
   }
 }
 
+export interface BatteryReading {
+  level: number | null;
+  charging: boolean | null;
+  source: "battery" | "none" | "unavailable";
+}
+
+/**
+ * A screen's battery report: `{ level: 0–100, charging }`, or "none" (no
+ * battery), or "unavailable" (the browser won't say). Anything else — or
+ * nothing, from a screen running an older build — is null and changes nothing.
+ */
+export function parseBattery(value: unknown): BatteryReading | null {
+  if (value === "none" || value === "unavailable") return { level: null, charging: null, source: value };
+  if (!value || typeof value !== "object") return null;
+  const { level, charging } = value as { level?: unknown; charging?: unknown };
+  if (typeof level !== "number" || !Number.isFinite(level) || level < 0 || level > 100 || typeof charging !== "boolean") return null;
+  return { level: Math.round(level), charging, source: "battery" };
+}
+
 async function screenFromCookie(db: Db, req: Request): Promise<{ id: string; board_id: string | null } | null> {
   const token = readCookie(req, SCREEN_COOKIE);
   if (!token) return null;
@@ -277,11 +296,21 @@ export function screenRouter(live: Live): Router {
       res.status(204).end();
       return;
     }
-    await db.query("UPDATE screens SET last_seen_at = NOW() WHERE id = $1", [screen.id]);
+    const battery = parseBattery(req.body?.battery);
+    if (battery) {
+      await db.query(
+        `UPDATE screens SET last_seen_at = NOW(), battery_level = $2, battery_charging = $3, battery_source = $4, battery_at = NOW()
+          WHERE id = $1`,
+        [screen.id, battery.level, battery.charging, battery.source]
+      );
+    } else {
+      await db.query("UPDATE screens SET last_seen_at = NOW() WHERE id = $1", [screen.id]);
+    }
     hub.seen(screen.id, screen.board_id, {
       awake: req.body?.awake === true,
       visible: req.body?.visible !== false,
       needsTap: req.body?.needsTap === true,
+      battery: battery ? `${battery.source}:${battery.level}:${battery.charging}` : undefined,
     });
     res.json(await live.screenState(screen.id));
   });

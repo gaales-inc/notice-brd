@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { COLORS, DEFAULT_STYLE, Display, MAX_BOARD_NAME, MAX_MESSAGE_LENGTH, MAX_SCREEN_NAME, Size, Speed } from "../../../shared/style";
 import { api, ApiError } from "../api";
 import { linkHandler, navigate } from "../router";
-import { Icon, Modal, ScreenStatus, STATUS_LABEL, StatusDot, timeAgo, toast, useTick } from "./common";
+import { Battery, BatteryBadge, Icon, isLowBattery, Modal, ScreenStatus, STATUS_LABEL, StatusDot, timeAgo, toast, useTick } from "./common";
 import { Marquee } from "./Marquee";
 
 interface CalendarSetting {
@@ -39,6 +39,7 @@ interface Screen {
   needsTap: boolean;
   lastSeenAt: string | null;
   meeting: { messageId: string; title: string; end: string } | null;
+  battery: Battery;
 }
 
 interface Member {
@@ -181,6 +182,7 @@ export function BoardPage({ boardId }: { boardId: string }) {
 
   const awake = data.screens.filter((s) => s.status === "awake").length;
   const onAir = data.messages.filter((m) => m.screenIds.length || m.meeting).length;
+  const lowScreens = data.screens.filter((s) => s.status !== "offline" && isLowBattery(s.battery));
 
   return (
     <>
@@ -200,6 +202,13 @@ export function BoardPage({ boardId }: { boardId: string }) {
         <span class={onAir ? "on-air" : ""}>
           {onAir ? `${onAir} ${onAir === 1 ? "message" : "messages"} broadcasting` : "Nothing broadcasting"}
         </span>
+        {lowScreens.length > 0 && (
+          <span class="battery-warn">
+            {lowScreens.length === 1 && typeof lowScreens[0]!.battery === "object" && lowScreens[0]!.battery
+              ? `${lowScreens[0]!.name}'s battery is at ${lowScreens[0]!.battery.level}%`
+              : `${lowScreens.length} screens are low on battery`}
+          </span>
+        )}
         {error && <span class="warn">Not updating: {error}</span>}
       </p>
 
@@ -719,10 +728,11 @@ function ScreenChips({ screens }: { screens: Screen[] }) {
 }
 
 function screenStatusText(s: Screen): string {
-  if (s.status === "awake") return "Awake — board open, screen kept on";
-  if (s.needsTap) return "Board open — tap the screen once to keep it awake";
-  if (s.status === "open") return "Board open, but the screen may sleep";
-  return `Offline — last seen ${timeAgo(s.lastSeenAt)}`;
+  const battery = s.battery && typeof s.battery === "object" ? ` · battery ${s.battery.level}%${s.battery.charging ? ", charging" : ""}` : "";
+  if (s.status === "awake") return `Awake — board open, screen kept on${battery}`;
+  if (s.needsTap) return `Board open — tap the screen once to keep it awake${battery}`;
+  if (s.status === "open") return `Board open, but the screen may sleep${battery}`;
+  return `Offline — last seen ${timeAgo(s.lastSeenAt)}${battery}`;
 }
 
 function BroadcastDialog({
@@ -796,7 +806,7 @@ function BroadcastDialog({
                     <input type="checkbox" checked={chosen.includes(s.id)} onChange={() => toggle(s.id)} />
                     <span class="pick-body">
                       <span class="pick-name">
-                        <StatusDot status={s.status} /> {s.name}
+                        <StatusDot status={s.status} /> {s.name} <BatteryBadge battery={s.battery} stale={s.status === "offline"} />
                       </span>
                       <span class="faint pick-sub">
                         {STATUS_LABEL[s.status]}
@@ -877,11 +887,13 @@ function ScreenRow({ boardId, screen, messages, act }: { boardId: string; screen
       <div class="screen-row-head">
         <StatusDot status={screen.status} />
         <span class="screen-name">{screen.name}</span>
+        <BatteryBadge battery={screen.battery} stale={screen.status === "offline"} />
         <span class={`status-label status-${screen.status}`}>{screen.needsTap ? "Needs a tap" : STATUS_LABEL[screen.status]}</span>
       </div>
       <p class="faint screen-sub">
         {screen.device}
         {screen.status === "offline" && ` · last seen ${timeAgo(screen.lastSeenAt)}`}
+        {screen.battery === "unavailable" && " · this browser doesn't share its battery level"}
       </p>
       {screen.needsTap && (
         <p class="warn small screen-note-row">
