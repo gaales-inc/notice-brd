@@ -20,16 +20,31 @@ export type ScreenStatus = "awake" | "open" | "offline";
 /** Two missed heartbeats, plus slack for a slow network. */
 export const ONLINE_WINDOW_MS = 45_000;
 
-interface Presence {
-  boardId: string | null;
-  /** Epoch ms of the last heartbeat; 0 once the page has said it is closing. */
+/** One open copy of a screen's page. */
+interface ClientPresence {
+  /** Epoch ms of its last heartbeat. */
   lastSeen: number;
   /** Holding a screen wake lock (or the video fallback). */
   awake: boolean;
-  /** The page is in the foreground; a hidden page can't keep the screen on. */
+  /** In the foreground; a hidden page can't keep the screen on. */
   visible: boolean;
-  /** The browser will only keep the screen on after someone taps it (Safari, each launch). */
+  /** Its browser will only keep the screen on after someone taps it (Safari, each launch). */
   needsTap: boolean;
+}
+
+/**
+ * A screen can be open more than once at a time: a reload overlaps the page
+ * it replaces, and iOS copies Safari's cookies into an app added to the home
+ * screen, so a Safari tab and the app can be the same screen. Each copy
+ * reports for itself, and the screen is the best of them — awake if any
+ * copy in front is awake — so a copy in the background can't contradict the
+ * one on show.
+ */
+interface Presence {
+  boardId: string | null;
+  clients: Map<string, ClientPresence>;
+  /** Epoch ms of the last heartbeat from any copy, for "last seen". */
+  lastSeen: number;
   /** The last battery reading, as a key: dashboards hear when it changes. */
   battery: string;
   /** What dashboards were last told, so they hear about changes only. */
@@ -43,6 +58,9 @@ export interface StatusReport {
   /** A key for the battery reading; omitted leaves the last one standing. */
   battery?: string;
 }
+
+/** Copies of one screen tracked at once; more is a page reloading in a loop. */
+const MAX_CLIENTS = 8;
 
 type ScreenListener = (event: string, data: unknown) => void;
 
@@ -115,35 +133,37 @@ export class Hub {
     for (const listener of this.screenListeners.get(screenId) ?? []) listener(event, data);
   }
 
-  /** A heartbeat (or a stream opening, which carries no report). */
-  seen(screenId: string, boardId: string | null, report?: StatusReport) {
-    const p = this.presence.get(screenId) ?? {
-      boardId,
-      lastSeen: 0,
-      awake: false,
-      visible: true,
-      needsTap: false,
-      battery: "",
-      reported: "offline",
-    };
+  /**
+   * A heartbeat from one copy of the screen's page (or that copy opening its
+   * stream, which carries no report). `clientId` names the copy; screens on
+   * an older build send none and share one.
+   */
+  seen(screenId: string, boardId: string | null, report?: StatusReport, clientId = "default") {
+    const now = this.now();
+    const p = this.presence.get(screenId) ?? { boardId, clients: new Map(), lastSeen: 0, battery: "", reported: "offline" };
     p.boardId = boardId;
-    p.lastSeen = this.now();
+    p.lastSeen = now;
+    const client = p.clients.get(clientId) ?? { lastSeen: 0, awake: false, visible: true, needsTap: false };
+    client.lastSeen = now;
     if (report) {
-      p.awake = report.awake;
-      p.visible = report.visible;
-      p.needsTap = report.needsTap === true;
+      client.awake = report.awake;
+      client.visible = report.visible;
+      client.needsTap = report.needsTap === true;
       if (report.battery !== undefined) p.battery = report.battery;
     }
+    p.clients.delete(clientId);
+    p.clients.set(clientId, client); // newest last
+    this.prune(p);
     this.presence.set(screenId, p);
     this.check(screenId, p);
   }
 
-  /** The page is closing (its pagehide beacon). */
-  closed(screenId: string) {
+  /** A copy of the page is closing (its pagehide beacon); without an id, all of them. */
+  closed(screenId: string, clientId?: string) {
     const p = this.presence.get(screenId);
     if (!p) return;
-    p.lastSeen = 0;
-    p.awake = false;
+    if (clientId) p.clients.delete(clientId);
+    else p.clients.clear();
     this.check(screenId, p);
   }
 
@@ -163,7 +183,7 @@ export class Hub {
   /** Open but asleep-able only because nobody has tapped it yet. */
   needsTap(screenId: string): boolean {
     const p = this.presence.get(screenId);
-    return !!p && p.needsTap && this.compute(p) === "open";
+    return !!p && this.compute(p) === "open" && this.fresh(p).some((c) => c.needsTap);
   }
 
   /** Epoch ms of the last heartbeat this process saw, if any. */
@@ -175,20 +195,35 @@ export class Hub {
   sweep() {
     const cutoff = this.now() - 60 * 60_000;
     for (const [id, p] of this.presence) {
+      this.prune(p);
       this.check(id, p);
       // Long gone and nobody listening: the database has its last_seen_at.
       if (p.reported.startsWith("offline") && p.lastSeen < cutoff && !this.isListening(id)) this.presence.delete(id);
     }
   }
 
+  private fresh(p: Presence): ClientPresence[] {
+    const cutoff = this.now() - ONLINE_WINDOW_MS;
+    return [...p.clients.values()].filter((c) => c.lastSeen >= cutoff);
+  }
+
+  /** Drops copies long gone, and the oldest beyond MAX_CLIENTS. */
+  private prune(p: Presence) {
+    const cutoff = this.now() - ONLINE_WINDOW_MS;
+    for (const [id, c] of p.clients) if (c.lastSeen < cutoff) p.clients.delete(id);
+    while (p.clients.size > MAX_CLIENTS) p.clients.delete(p.clients.keys().next().value!);
+  }
+
   private compute(p: Presence): ScreenStatus {
-    if (!p.lastSeen || this.now() - p.lastSeen > ONLINE_WINDOW_MS) return "offline";
-    return p.awake && p.visible ? "awake" : "open";
+    const fresh = this.fresh(p);
+    if (!fresh.length) return "offline";
+    return fresh.some((c) => c.awake && c.visible) ? "awake" : "open";
   }
 
   private check(_screenId: string, p: Presence) {
     const status = this.compute(p);
-    const reported = `${status === "open" && p.needsTap ? "open:tap" : status}|${p.battery}`;
+    const tap = status === "open" && this.fresh(p).some((c) => c.needsTap);
+    const reported = `${tap ? "open:tap" : status}|${p.battery}`;
     if (reported === p.reported) return;
     p.reported = reported;
     this.notifyBoard(p.boardId);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { detectPlatform } from "../device";
+import { refreshApp } from "../refresh";
 import { navigate } from "../router";
 import { Connection, ScreenState, cachedState, startScreen, unpairScreen } from "../screenClient";
 import { setMode } from "../storage";
@@ -37,16 +38,27 @@ function useWake(): WakeState {
 /**
  * The board on a screen. Black, always: either a message running across it,
  * or nothing at all — no clock, no logo — so an OLED panel lights no pixels.
- * Either way the screen is kept awake. A tap shows what it is and how it is
- * doing for a few seconds, then it goes back to black.
+ * Either way the screen is kept awake.
+ *
+ * A tap shows a Refresh button in the corner for three seconds — a home-screen
+ * app has no other way to reload. Three quick taps open the screen's panel:
+ * what it is, how it's doing, and its options. Taps land as clicks straight
+ * away (`touch-action: manipulation`), so a triple tap isn't eaten by zoom.
  */
+
+/** Taps further apart than this start counting again. */
+const TAP_GAP_MS = 500;
+const REFRESH_SHOWN_MS = 3_000;
 export function ScreenPage() {
   const [state, setState] = useState<ScreenState | null>(cachedState);
   const [connection, setConnection] = useState<Connection>("connecting");
   const [panel, setPanel] = useState(false);
   const [slow, setSlow] = useState(false);
   const [updateReady, setUpdateReady] = useState(false);
+  const [refreshShown, setRefreshShown] = useState(false);
   const hideTimer = useRef<number>();
+  const refreshTimer = useRef<number>();
+  const taps = useRef({ count: 0, last: 0 });
   const wake = useWake();
 
   useEffect(() => {
@@ -73,13 +85,41 @@ export function ScreenPage() {
     hideTimer.current = window.setTimeout(() => setPanel(false), 8000);
   };
 
+  const hideRefresh = () => {
+    window.clearTimeout(refreshTimer.current);
+    setRefreshShown(false);
+  };
+
   const onTap = () => {
     nudge();
     if (panel) {
+      // A tap outside the panel closes it.
       setPanel(false);
       window.clearTimeout(hideTimer.current);
-    } else showPanel();
+      return;
+    }
+    const now = Date.now();
+    const t = taps.current;
+    t.count = now - t.last <= TAP_GAP_MS ? t.count + 1 : 1;
+    t.last = now;
+    if (t.count >= 3) {
+      t.count = 0;
+      hideRefresh();
+      showPanel();
+      return;
+    }
+    setRefreshShown(true);
+    window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => setRefreshShown(false), REFRESH_SHOWN_MS);
   };
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(refreshTimer.current);
+      window.clearTimeout(hideTimer.current);
+    },
+    []
+  );
 
   const message = state?.paired ? state.message : null;
 
@@ -94,6 +134,18 @@ export function ScreenPage() {
           <p>Tap anywhere to keep this screen awake</p>
           <p class="tap-why">This browser asks for a tap each time NoticeBrd opens.</p>
         </div>
+      )}
+      {refreshShown && !panel && (
+        <button
+          class="screen-refresh"
+          onClick={(e) => {
+            e.stopPropagation();
+            void refreshApp();
+          }}
+        >
+          <Icon name="refresh" />
+          <span>Refresh</span>
+        </button>
       )}
       {panel && (
         <ScreenPanel
@@ -131,7 +183,7 @@ function Pairing({ state }: { state: ScreenState }) {
         </li>
         <li>Enter the code above</li>
       </ol>
-      <p class="faint">The code changes every 30 minutes. Tap the screen for options.</p>
+      <p class="faint">The code changes every 30 minutes. Tap three times for options.</p>
     </div>
   );
 }
@@ -234,6 +286,16 @@ function ScreenPanel({
             <span>Update</span>
           </button>
         )}
+        <button
+          class="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            void refreshApp();
+          }}
+        >
+          <Icon name="refresh" />
+          <span>Refresh</span>
+        </button>
         <InstallButton />
         <button
           class="button"

@@ -72,6 +72,11 @@ export function normalizePairCode(value: unknown): string {
   return typeof value === "string" ? value.toUpperCase().replace(/[^A-Z0-9]/g, "") : "";
 }
 
+/** Which copy of the screen's page is speaking: a random id per page load. Older builds send none. */
+export function clientIdOf(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : undefined;
+}
+
 export function cleanDeviceName(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 60);
@@ -261,7 +266,7 @@ export function screenRouter(live: Live): Router {
       if (!rows[0]?.live) await live.issuePairCode(screen.id);
     }
 
-    hub.seen(screen.id, screen.board_id);
+    hub.seen(screen.id, screen.board_id, undefined, clientIdOf(req.body?.client));
     res.json(await live.screenState(screen.id));
   });
 
@@ -275,7 +280,7 @@ export function screenRouter(live: Live): Router {
     let unsubscribe = () => {};
     const send = openStream(res, () => unsubscribe());
     unsubscribe = hub.subscribeScreen(screen.id, send);
-    hub.seen(screen.id, screen.board_id);
+    hub.seen(screen.id, screen.board_id, undefined, clientIdOf(req.query.client));
     const state = await live.screenState(screen.id);
     if (state) send("state", state);
   });
@@ -291,8 +296,9 @@ export function screenRouter(live: Live): Router {
       res.status(401).json({ error: "Unknown screen" });
       return;
     }
+    const client = clientIdOf(req.body?.client);
     if (req.body?.open === false) {
-      hub.closed(screen.id);
+      hub.closed(screen.id, client);
       res.status(204).end();
       return;
     }
@@ -311,7 +317,7 @@ export function screenRouter(live: Live): Router {
       visible: req.body?.visible !== false,
       needsTap: req.body?.needsTap === true,
       battery: battery ? `${battery.source}:${battery.level}:${battery.charging}` : undefined,
-    });
+    }, client);
     res.json(await live.screenState(screen.id));
   });
 
