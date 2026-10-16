@@ -122,6 +122,7 @@ const PATHS: Record<string, string> = {
   unlink: "M9 15l6-6M10 6l1-1a4 4 0 016 6l-1 1M14 18l-1 1a4 4 0 01-6-6l1-1",
   calendar: "M4 6h16v14H4zM4 10h16M8 3v4M16 3v4",
   refresh: "M20 12a8 8 0 11-2.3-5.6M20 4v5h-5",
+  clock: "M12 21a9 9 0 100-18 9 9 0 000 18zM12 7v5l3 2",
 };
 
 export function Icon({ name }: { name: keyof typeof PATHS | string }) {
@@ -129,6 +130,67 @@ export function Icon({ name }: { name: keyof typeof PATHS | string }) {
     <svg class="icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
       <path d={PATHS[name]} fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
     </svg>
+  );
+}
+
+// ---------------------------------------------------------------------- forms
+
+export function Segmented<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: Record<T, string>;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div class="segmented" role="radiogroup" aria-label={label}>
+      {(Object.keys(options) as T[]).map((k) => (
+        <button key={k} type="button" role="radio" aria-checked={value === k} class={value === k ? "selected" : ""} onClick={() => onChange(k)}>
+          {options[k]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** "Show it on": all the board's screens (null), or the ones ticked. */
+export function ScreenChooser({
+  value,
+  onChange,
+  screens,
+}: {
+  value: string[] | null;
+  onChange: (v: string[] | null) => void;
+  screens: { id: string; name: string }[];
+}) {
+  const chosen = value ?? [];
+  return (
+    <div class="field compact">
+      <span>Show it on</span>
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={value === null}
+          onChange={(e) => onChange((e.target as HTMLInputElement).checked ? null : screens.map((s) => s.id))}
+        />
+        <span>All screens</span>
+      </label>
+      {value !== null &&
+        screens.map((s) => (
+          <label class="check indent" key={s.id}>
+            <input
+              type="checkbox"
+              checked={chosen.includes(s.id)}
+              onChange={() => onChange(chosen.includes(s.id) ? chosen.filter((id) => id !== s.id) : [...chosen, s.id])}
+            />
+            <span>{s.name}</span>
+          </label>
+        ))}
+    </div>
   );
 }
 

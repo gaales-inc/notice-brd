@@ -434,6 +434,80 @@ describe("calendars", () => {
   });
 });
 
+describe("schedules", () => {
+  const at = (iso: string) => new Date(iso).getTime();
+  const showing = async (s: { agent: ReturnType<typeof request.agent> }) =>
+    (await s.agent.post("/api/screen/status").send({}).expect(200)).body.message?.text ?? null;
+
+  it("shows a message at its set times, then goes back to what the screen showed", async () => {
+    ctx.clock.now = at("2026-10-15T05:00:00Z"); // Thursday, 8:00 in Kampala
+    const { owner, boardId } = await makeBoard();
+    const door = await pair(owner, boardId, "Office door");
+    const lobby = await pair(owner, boardId, "Lobby");
+    const welcome = await owner.agent.post(`/api/boards/${boardId}/messages`).send({ text: "Welcome" }).expect(201);
+    await owner.agent.patch(`/api/boards/${boardId}/screens/${lobby.id}`).send({ messageId: welcome.body.message.id }).expect(200);
+
+    const schedule = {
+      timeZone: "Africa/Kampala",
+      screenIds: [lobby.id],
+      slots: [{ type: "weekly", days: [1, 2, 3, 4, 5], from: "12:30", to: "13:30" }],
+    };
+    const lunch = await owner.agent.post(`/api/boards/${boardId}/messages`).send({ text: "Back at 1:30", schedule }).expect(201);
+    const lunchId = lunch.body.message.id;
+    expect(await showing(lobby)).toBe("Welcome");
+
+    // 12:30 in Kampala.
+    ctx.clock.now = at("2026-10-15T09:30:00Z");
+    await ctx.calendar.evaluateAll();
+    expect(await showing(lobby)).toBe("Back at 1:30");
+    expect(await showing(door)).toBeNull(); // not one of its screens
+    const board = (await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body;
+    const card = board.messages.find((m: { id: string }) => m.id === lunchId);
+    expect(card.schedule).toEqual(schedule);
+    expect(card.scheduled).toEqual({ end: "2026-10-15T10:30:00.000Z", screenIds: [lobby.id] });
+    expect(card.meeting).toBeNull();
+    expect(board.screens.find((s: { id: string }) => s.id === lobby.id)).toMatchObject({
+      messageId: welcome.body.message.id,
+      scheduled: { messageId: lunchId, end: "2026-10-15T10:30:00.000Z" },
+      meeting: null,
+    });
+
+    // 13:30: back to the welcome.
+    ctx.clock.now = at("2026-10-15T10:30:00Z");
+    await ctx.calendar.evaluateAll();
+    expect(await showing(lobby)).toBe("Welcome");
+
+    // Saturday lunchtime: not a weekday.
+    ctx.clock.now = at("2026-10-17T09:45:00Z");
+    await ctx.calendar.evaluateAll();
+    expect(await showing(lobby)).toBe("Welcome");
+
+    // Rescheduled for once, today, on every screen: it comes on straight away.
+    await owner.agent
+      .patch(`/api/boards/${boardId}/messages/${lunchId}`)
+      .send({ schedule: { timeZone: "Africa/Kampala", screenIds: null, slots: [{ type: "once", start: "2026-10-17T12:00", end: "2026-10-17T14:00" }] } })
+      .expect(200);
+    expect(await showing(door)).toBe("Back at 1:30");
+    expect(await showing(lobby)).toBe("Back at 1:30");
+    expect((await owner.agent.get("/api/boards").expect(200)).body.boards[0].onAir).toBe(2);
+
+    // Unscheduled: each screen goes back to its own.
+    await owner.agent.patch(`/api/boards/${boardId}/messages/${lunchId}`).send({ schedule: null }).expect(200);
+    expect(await showing(door)).toBeNull();
+    expect(await showing(lobby)).toBe("Welcome");
+  });
+
+  it("turns away a schedule that doesn't make sense", async () => {
+    const { owner, boardId } = await makeBoard();
+    const res = await owner.agent
+      .post(`/api/boards/${boardId}/messages`)
+      .send({ text: "x", schedule: { timeZone: "Africa/Kampala", slots: [{ type: "once", start: "2026-10-20T10:00", end: "2026-10-20T09:00" }] } })
+      .expect(400);
+    expect(res.body.error).toMatch(/end after it starts/);
+    expect((await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body.messages).toEqual([]);
+  });
+});
+
 describe("battery", () => {
   it("shows each screen's battery and flags the low ones", async () => {
     const { owner, boardId } = await makeBoard();

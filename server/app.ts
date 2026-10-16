@@ -22,7 +22,7 @@ export interface AppOptions {
   codeCooldownSeconds?: number;
   /** How calendar feeds are fetched (tests serve their own). */
   fetchCalendar?: FeedFetcher;
-  /** The clock meetings are judged by (tests move it). */
+  /** The clock meetings and schedules are judged by (tests move it). */
   now?: () => number;
 }
 
@@ -52,7 +52,7 @@ export function createApp({
   const live = new Live(db, hub, readVersion(webDir));
   live.now = now;
   const calendar = new CalendarSync(live, fetchCalendar, now);
-  live.evaluateCalendar = (boardId) => calendar.evaluate(boardId);
+  live.evaluateAuto = (boardId) => calendar.evaluate(boardId);
   app.disable("x-powered-by");
   app.use(securityHeaders);
 

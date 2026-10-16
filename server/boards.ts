@@ -17,6 +17,7 @@ import {
   MAX_MESSAGE_LENGTH,
   MAX_SCREEN_NAME,
 } from "../shared/style";
+import { parseSchedule, Schedule } from "../shared/schedule";
 import { AuthedRequest, normalizeEmail, requireUser } from "./auth";
 import { CalendarSync, describeFeed, FeedError, Meeting, normalizeFeedUrl } from "./calendar";
 import { Mailer } from "./mailr";
@@ -61,6 +62,7 @@ interface MessageRow {
   auto_calendar: boolean;
   auto_calendar_id: string | null;
   auto_screen_ids: string[] | null;
+  schedule: Schedule | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -198,7 +200,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
         [boardId]
       ),
       db.query<MessageRow>(
-        `SELECT id, text, color, speed, size, display, auto_calendar, auto_calendar_id, auto_screen_ids, created_at, updated_at
+        `SELECT id, text, color, speed, size, display, auto_calendar, auto_calendar_id, auto_screen_ids, schedule, created_at, updated_at
            FROM messages WHERE board_id = $1 ORDER BY created_at DESC`,
         [boardId]
       ),
@@ -215,6 +217,10 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
     const board = boards[0]!;
     const overrides = new Map(screens.map((s) => [s.id, live.override(s.id, boardId)]));
     const now = live.now();
+    const iso = (epoch: number | null) => (epoch === null ? null : new Date(epoch).toISOString());
+    /** The screens a meeting, or a scheduled time, has put this message on right now. */
+    const putOn = (messageId: string, kind: "meeting" | "schedule") =>
+      screens.filter((s) => overrides.get(s.id)?.messageId === messageId && overrides.get(s.id)?.kind === kind);
 
     res.json({
       board: { id: board.id, name: board.name, createdAt: board.created_at },
@@ -222,8 +228,10 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
       me: req.user!.id,
       members: members.map((m) => ({ userId: m.user_id, email: m.email, role: m.role, pending: m.pending })),
       messages: messages.map((m) => {
-        const during = screens.filter((s) => overrides.get(s.id)?.messageId === m.id);
+        const during = putOn(m.id, "meeting");
         const meeting = during.length ? overrides.get(during[0]!.id)! : null;
+        const scheduledOn = putOn(m.id, "schedule");
+        const scheduled = scheduledOn.length ? overrides.get(scheduledOn[0]!.id)! : null;
         return {
           id: m.id,
           text: m.text,
@@ -240,10 +248,10 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
             calendarId: m.auto_calendar_id,
             screenIds: Array.isArray(m.auto_screen_ids) ? m.auto_screen_ids : null,
           },
-          // Where a meeting has put it right now.
-          meeting: meeting
-            ? { title: meeting.title, end: new Date(meeting.end).toISOString(), screenIds: during.map((s) => s.id) }
-            : null,
+          schedule: m.schedule,
+          // Where a meeting, or a scheduled time, has put it right now.
+          meeting: meeting ? { title: meeting.title ?? "Meeting", end: iso(meeting.end), screenIds: during.map((s) => s.id) } : null,
+          scheduled: scheduled ? { end: iso(scheduled.end), screenIds: scheduledOn.map((s) => s.id) } : null,
         };
       }),
       screens: screens.map((s) => {
@@ -260,7 +268,8 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
           status: hub.status(s.id),
           needsTap: hub.needsTap(s.id),
           lastSeenAt: lastSeen ? new Date(lastSeen).toISOString() : null,
-          meeting: o ? { messageId: o.messageId, title: o.title, end: new Date(o.end).toISOString() } : null,
+          meeting: o?.kind === "meeting" ? { messageId: o.messageId, title: o.title ?? "Meeting", end: iso(o.end) } : null,
+          scheduled: o?.kind === "schedule" ? { messageId: o.messageId, end: iso(o.end) } : null,
           battery: batteryOf(s),
         };
       }),
@@ -359,10 +368,19 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
         } else out.auto_screen_ids = null;
       }
     }
+    if (body.schedule !== undefined) {
+      if (body.schedule === null) out.schedule = null;
+      else {
+        const schedule = parseSchedule(body.schedule);
+        if (typeof schedule === "string") return schedule;
+        out.schedule = JSON.stringify(schedule);
+      }
+    }
     return out;
   }
 
-  const columnValue = (column: string, index: number) => (column === "auto_screen_ids" ? `$${index}::jsonb` : `$${index}`);
+  const columnValue = (column: string, index: number) =>
+    column === "auto_screen_ids" || column === "schedule" ? `$${index}::jsonb` : `$${index}`;
 
   router.post("/boards/:boardId/messages", onBoard, async (req: BoardRequest, res: Response) => {
     const fields = await messageFields(req.boardId!, req.body ?? {}, true);
@@ -384,7 +402,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
       values
     );
     hub.notifyBoard(req.boardId!);
-    if (fields.auto_calendar) await live.evaluateCalendar(req.boardId!);
+    if (fields.auto_calendar || fields.schedule) await live.evaluateAuto(req.boardId!);
     res.status(201).json({
       message: { id: rows[0]!.id, text: fields.text, color: fields.color, speed: fields.speed, size: fields.size, display: fields.display },
     });
@@ -414,7 +432,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
       res.status(404).json({ error: "Message not found" });
       return;
     }
-    await live.evaluateCalendar(req.boardId!);
+    await live.evaluateAuto(req.boardId!);
     await live.boardChanged(req.boardId!);
     res.json({ ok: true });
   });
@@ -426,7 +444,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
     }
     // Screens showing it go black (the foreign key sets their message to NULL).
     await db.query("DELETE FROM messages WHERE board_id = $1 AND id = $2", [req.boardId, req.params.messageId]);
-    await live.evaluateCalendar(req.boardId!);
+    await live.evaluateAuto(req.boardId!);
     await live.boardChanged(req.boardId!);
     res.status(204).end();
   });
@@ -525,7 +543,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
       return;
     }
     hub.moved(screen.id, null, req.boardId!);
-    await live.evaluateCalendar(req.boardId!);
+    await live.evaluateAuto(req.boardId!);
     await live.pushScreen(screen.id);
     res.status(201).json({ screen });
   });
@@ -673,7 +691,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
     // Messages that followed only this calendar stop following any.
     await db.query("UPDATE messages SET auto_calendar = FALSE WHERE board_id = $1 AND auto_calendar_id = $2", [req.boardId, id]);
     await db.query("DELETE FROM calendars WHERE id = $1", [id]);
-    await live.evaluateCalendar(req.boardId!);
+    await live.evaluateAuto(req.boardId!);
     hub.notifyBoard(req.boardId!);
     res.status(204).end();
   });

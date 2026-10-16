@@ -110,5 +110,9 @@ export async function migrate(db: Db): Promise<void> {
     ALTER TABLE screens ADD COLUMN IF NOT EXISTS battery_charging BOOLEAN;
     ALTER TABLE screens ADD COLUMN IF NOT EXISTS battery_source TEXT;
     ALTER TABLE screens ADD COLUMN IF NOT EXISTS battery_at TIMESTAMPTZ;
+
+    -- Set times a message shows by itself (see shared/schedule.ts): its time
+    -- zone, its screens (NULL: all of them) and its times. NULL: not scheduled.
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS schedule JSONB;
   `);
 }
