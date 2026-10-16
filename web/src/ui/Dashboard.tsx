@@ -19,6 +19,7 @@ interface BoardSummary {
   awake: number;
   open: number;
   onAir: number;
+  lowBattery: number;
 }
 
 /** /dashboard and /dashboard/:boardId, behind the email code. */
@@ -291,6 +292,7 @@ function BoardList() {
                   </span>
                 )}
                 <span class={b.onAir ? "on-air" : ""}>{b.onAir ? `${b.onAir} broadcasting` : "Nothing broadcasting"}</span>
+                {b.lowBattery > 0 && <span class="battery-warn">{b.lowBattery} low on battery</span>}
               </p>
             </a>
           ))}

@@ -30,6 +30,8 @@ interface Presence {
   visible: boolean;
   /** The browser will only keep the screen on after someone taps it (Safari, each launch). */
   needsTap: boolean;
+  /** The last battery reading, as a key: dashboards hear when it changes. */
+  battery: string;
   /** What dashboards were last told, so they hear about changes only. */
   reported: string;
 }
@@ -38,6 +40,8 @@ export interface StatusReport {
   awake: boolean;
   visible: boolean;
   needsTap?: boolean;
+  /** A key for the battery reading; omitted leaves the last one standing. */
+  battery?: string;
 }
 
 type ScreenListener = (event: string, data: unknown) => void;
@@ -119,6 +123,7 @@ export class Hub {
       awake: false,
       visible: true,
       needsTap: false,
+      battery: "",
       reported: "offline",
     };
     p.boardId = boardId;
@@ -127,6 +132,7 @@ export class Hub {
       p.awake = report.awake;
       p.visible = report.visible;
       p.needsTap = report.needsTap === true;
+      if (report.battery !== undefined) p.battery = report.battery;
     }
     this.presence.set(screenId, p);
     this.check(screenId, p);
@@ -171,7 +177,7 @@ export class Hub {
     for (const [id, p] of this.presence) {
       this.check(id, p);
       // Long gone and nobody listening: the database has its last_seen_at.
-      if (p.reported === "offline" && p.lastSeen < cutoff && !this.isListening(id)) this.presence.delete(id);
+      if (p.reported.startsWith("offline") && p.lastSeen < cutoff && !this.isListening(id)) this.presence.delete(id);
     }
   }
 
@@ -182,7 +188,7 @@ export class Hub {
 
   private check(_screenId: string, p: Presence) {
     const status = this.compute(p);
-    const reported = status === "open" && p.needsTap ? "open:tap" : status;
+    const reported = `${status === "open" && p.needsTap ? "open:tap" : status}|${p.battery}`;
     if (reported === p.reported) return;
     p.reported = reported;
     this.notifyBoard(p.boardId);

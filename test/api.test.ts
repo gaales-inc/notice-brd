@@ -433,3 +433,59 @@ describe("calendars", () => {
     expect(boardId).toBeTruthy();
   });
 });
+
+describe("battery", () => {
+  it("shows each screen's battery and flags the low ones", async () => {
+    const { owner, boardId } = await makeBoard();
+    const tablet = await pair(owner, boardId, "Tablet");
+    const tv = await pair(owner, boardId, "TV");
+    const iPad = await pair(owner, boardId, "iPad");
+    const battery = async () => {
+      const res = await owner.agent.get(`/api/boards/${boardId}`).expect(200);
+      return Object.fromEntries(res.body.screens.map((s: { name: string; battery: unknown }) => [s.name, s.battery]));
+    };
+
+    // Before any report.
+    expect(await battery()).toEqual({ Tablet: null, TV: null, iPad: null });
+
+    await tablet.agent.post("/api/screen/status").send({ awake: true, battery: { level: 63.6, charging: false } }).expect(200);
+    await tv.agent.post("/api/screen/status").send({ awake: true, battery: "none" }).expect(200);
+    await iPad.agent.post("/api/screen/status").send({ awake: true, battery: "unavailable" }).expect(200);
+    let now = await battery();
+    expect(now.Tablet).toMatchObject({ level: 64, charging: false });
+    expect(now.TV).toBe("none");
+    expect(now.iPad).toBe("unavailable");
+
+    const lowBattery = async () =>
+      (await owner.agent.get("/api/boards").expect(200)).body.boards.find((b: { id: string }) => b.id === boardId).lowBattery;
+    expect(await lowBattery()).toBe(0);
+
+    await tablet.agent.post("/api/screen/status").send({ awake: true, battery: { level: 12, charging: false } }).expect(200);
+    expect(await lowBattery()).toBe(1);
+    // Charging, it's no longer a worry.
+    await tablet.agent.post("/api/screen/status").send({ awake: true, battery: { level: 12, charging: true } }).expect(200);
+    expect(await lowBattery()).toBe(0);
+
+    // Nonsense, or a screen on an older build that doesn't report, leaves the last reading.
+    await tablet.agent.post("/api/screen/status").send({ awake: true, battery: { level: 150, charging: false } }).expect(200);
+    await tablet.agent.post("/api/screen/status").send({ awake: true }).expect(200);
+    now = await battery();
+    expect(now.Tablet).toMatchObject({ level: 12, charging: true });
+  });
+
+  it("tells dashboards when the battery changes", async () => {
+    const { owner, boardId } = await makeBoard();
+    const s = await pair(owner, boardId);
+    await s.agent.post("/api/screen/status").send({ awake: true, battery: { level: 80, charging: false } }).expect(200);
+    await new Promise((r) => setTimeout(r, 80));
+    let changes = 0;
+    const unsubscribe = ctx.hub.subscribeBoard(boardId, () => changes++);
+    await s.agent.post("/api/screen/status").send({ awake: true, battery: { level: 80, charging: false } }).expect(200);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(changes).toBe(0);
+    await s.agent.post("/api/screen/status").send({ awake: true, battery: { level: 79, charging: false } }).expect(200);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(changes).toBe(1);
+    unsubscribe();
+  });
+});

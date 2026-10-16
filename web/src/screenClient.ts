@@ -1,4 +1,5 @@
 import { api, ApiError } from "./api";
+import { batteryReport, onBatteryChange, watchBattery } from "./battery";
 import { describeDevice } from "./device";
 import { load, save } from "./storage";
 import { onWakeChange, reloadCostsATap, wakeState } from "./wake";
@@ -140,7 +141,7 @@ export function startScreen({ onState, onConnection, onUpdateReady }: ScreenCall
       const state = await api<ScreenState>(
         "POST",
         "/api/screen/status",
-        { awake: wake.active, visible: document.visibilityState !== "hidden", needsTap: wake.needsTap },
+        { awake: wake.active, visible: document.visibilityState !== "hidden", needsTap: wake.needsTap, battery: batteryReport() },
         10_000
       );
       if (state) apply(state);
@@ -183,6 +184,8 @@ export function startScreen({ onState, onConnection, onUpdateReady }: ScreenCall
   if (current) onState(current);
   void hello();
   const beat = window.setInterval(() => void heartbeat(), HEARTBEAT_MS);
+  watchBattery();
+  const stopBattery = onBatteryChange(() => void heartbeat());
   // Report a change in wake state straight away — but only a change.
   let lastWake = "";
   const stopWake = onWakeChange((w) => {
@@ -204,6 +207,7 @@ export function startScreen({ onState, onConnection, onUpdateReady }: ScreenCall
     window.clearTimeout(retryTimer);
     window.clearTimeout(pairTimer);
     stopWake();
+    stopBattery();
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("pageshow", onPageShow);
     window.removeEventListener("online", resume);

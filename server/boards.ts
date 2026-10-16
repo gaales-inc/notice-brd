@@ -12,6 +12,7 @@ import {
   isDisplay,
   isSize,
   isSpeed,
+  LOW_BATTERY_PERCENT,
   MAX_BOARD_NAME,
   MAX_MESSAGE_LENGTH,
   MAX_SCREEN_NAME,
@@ -27,6 +28,28 @@ export const MAX_MEMBERS = 50;
 export const MAX_MESSAGES = 200;
 
 type Role = "owner" | "collaborator";
+
+interface BatteryColumns {
+  battery_level: number | null;
+  battery_charging: boolean | null;
+  battery_source: string | null;
+  battery_at: Date | null;
+}
+
+/**
+ * The battery as the dashboard shows it: a reading, "none" (nothing to show),
+ * "unavailable" (the browser won't say) or null (not reported yet).
+ */
+function batteryOf(s: BatteryColumns) {
+  if (s.battery_source === "battery" && s.battery_level !== null) {
+    return { level: s.battery_level, charging: !!s.battery_charging, at: s.battery_at };
+  }
+  if (s.battery_source === "none" || s.battery_source === "unavailable") return s.battery_source;
+  return null;
+}
+
+const isLow = (s: BatteryColumns) =>
+  s.battery_source === "battery" && s.battery_level !== null && s.battery_level <= LOW_BATTERY_PERCENT && !s.battery_charging;
 
 interface MessageRow {
   id: string;
@@ -107,8 +130,8 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
         ORDER BY b.created_at`,
       [req.user!.id]
     );
-    const { rows: screens } = await db.query<{ id: string; board_id: string; message_id: string | null }>(
-      `SELECT s.id, s.board_id, s.message_id
+    const { rows: screens } = await db.query<{ id: string; board_id: string; message_id: string | null } & BatteryColumns>(
+      `SELECT s.id, s.board_id, s.message_id, s.battery_level, s.battery_charging, s.battery_source, s.battery_at
          FROM screens s JOIN board_members m ON m.board_id = s.board_id
         WHERE m.user_id = $1`,
       [req.user!.id]
@@ -126,6 +149,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
           awake: statuses.filter((s) => s === "awake").length,
           open: statuses.filter((s) => s !== "offline").length,
           onAir: mine.filter((s) => s.message_id || live.override(s.id, b.id)).length,
+          lowBattery: mine.filter((s) => hub.status(s.id) !== "offline" && isLow(s)).length,
         };
       }),
     });
@@ -178,8 +202,8 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
            FROM messages WHERE board_id = $1 ORDER BY created_at DESC`,
         [boardId]
       ),
-      db.query<{ id: string; name: string; device: string; message_id: string | null; paired_at: Date; last_seen_at: Date | null }>(
-        `SELECT id, name, device, message_id, paired_at, last_seen_at
+      db.query<{ id: string; name: string; device: string; message_id: string | null; paired_at: Date; last_seen_at: Date | null } & BatteryColumns>(
+        `SELECT id, name, device, message_id, paired_at, last_seen_at, battery_level, battery_charging, battery_source, battery_at
            FROM screens WHERE board_id = $1 ORDER BY paired_at, id`,
         [boardId]
       ),
@@ -237,6 +261,7 @@ export function boardsRouter(live: Live, mailer: Mailer, appUrl: string, calenda
           needsTap: hub.needsTap(s.id),
           lastSeenAt: lastSeen ? new Date(lastSeen).toISOString() : null,
           meeting: o ? { messageId: o.messageId, title: o.title, end: new Date(o.end).toISOString() } : null,
+          battery: batteryOf(s),
         };
       }),
       calendars: calendars.map((c) => {

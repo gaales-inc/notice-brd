@@ -1,5 +1,6 @@
 import { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { LOW_BATTERY_PERCENT } from "../../../shared/style";
 import { detectPlatform, Platform } from "../device";
 import { promptInstall, useInstall } from "../install";
 
@@ -164,6 +165,35 @@ export function useTick(ms = 30_000) {
     const t = window.setInterval(() => set((n) => n + 1), ms);
     return () => window.clearInterval(t);
   }, [ms]);
+}
+
+// -------------------------------------------------------------------- battery
+
+/** A screen's battery: a reading, "none" (no battery), "unavailable" (the browser won't say) or null (not reported). */
+export type Battery = { level: number; charging: boolean; at: string | null } | "none" | "unavailable" | null;
+
+export const isLowBattery = (b: Battery) => !!b && typeof b === "object" && b.level <= LOW_BATTERY_PERCENT && !b.charging;
+
+/** The level as a phone shows it: an outline filled to the level, a bolt while charging. */
+export function BatteryBadge({ battery, stale = false }: { battery: Battery; stale?: boolean }) {
+  if (!battery || typeof battery !== "object") return null;
+  const tone = battery.charging ? "charging" : isLowBattery(battery) ? "low" : "ok";
+  const label = `Battery ${battery.level}%${battery.charging ? ", charging" : ""}${stale ? ", when last seen" : ""}`;
+  return (
+    <span class={`battery battery-${tone}${stale ? " stale" : ""}`} title={label} role="img" aria-label={label}>
+      <svg viewBox="0 0 26 14" width="22" height="12" aria-hidden="true">
+        <rect x="1" y="1" width="21" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.6" />
+        <rect x="23.2" y="4.5" width="2" height="5" rx="1" fill="currentColor" />
+        <rect x="3" y="3" width={Math.max(1.5, (17 * battery.level) / 100)} height="8" rx="1.5" fill="currentColor" />
+      </svg>
+      <span>{battery.level}%</span>
+      {battery.charging && (
+        <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+          <path d="M13 2L4 14h7l-1 8 9-12h-7z" fill="currentColor" />
+        </svg>
+      )}
+    </span>
+  );
 }
 
 // -------------------------------------------------------------------- install
