@@ -14,11 +14,22 @@ import { isStandalone } from "./install";
  * screen, say — until the page is reloaded. So a screen on an iPhone or iPad
  * needs one tap each time the app is opened, and asks for it plainly.
  *
- * Where there is no working wake lock — older Safari and Firefox, and iOS
- * home-screen apps before 18.4, which grant the lock and then ignore it — a
- * tiny silent video plays on a loop instead: a playing video keeps any phone
- * awake. It, too, can only start from a tap.
+ * Where there is no working wake lock — older Safari and Firefox, iOS
+ * home-screen apps before 18.4 (which grant the lock and then ignore it), or a
+ * lock the system keeps taking back (Low Power Mode) — a tiny silent video
+ * plays instead: a playing video keeps any phone awake. It, too, can only
+ * start from a tap.
+ *
+ * What the screen reports is steadied: a lock or video that drops and comes
+ * straight back (a lock being re-taken, the video being restarted) doesn't
+ * count, only one that stays down for GRACE_MS. Without that, an iPad could
+ * flicker between "awake" and "may sleep" on the dashboard every few seconds.
  */
+
+/** How long keeping awake must stay lost before it's reported lost. */
+const GRACE_MS = 5_000;
+/** A lock released this soon after it was granted didn't really hold. */
+const QUICK_RELEASE_MS = 15_000;
 
 export interface WakeState {
   /** The screen is being kept on. */
@@ -55,6 +66,14 @@ let retryTimer: number | undefined;
 let tapNeededOnLoad = false;
 /** When the screen was last tapped; a refusal soon after one means a tap doesn't help. */
 let lastTapAt = 0;
+let lockGrantedAt = 0;
+/** Locks in a row taken back soon after being granted. Two, and the video takes over. */
+let quickReleases = 0;
+/** The video is being paused by this module, not by the system. */
+let pausingVideo = false;
+/** When keeping awake last held; the grace period runs from here. */
+let lastActiveAt = 0;
+let graceTimer: number | undefined;
 const listeners = new Set<(s: WakeState) => void>();
 
 /**
@@ -74,9 +93,17 @@ function needsVideo(): boolean {
 
 const visible = () => document.visibilityState !== "hidden";
 
+/** Whether keeping awake holds at this instant, unsteadied. */
+function holding(): boolean {
+  return needsVideo() ? videoPlaying : !!sentinel && !sentinel.released;
+}
+
 export function wakeState(): WakeState {
   const video = needsVideo();
-  const active = video ? videoPlaying : !!sentinel && !sentinel.released;
+  const now = Date.now();
+  if (wanted && holding()) lastActiveAt = now;
+  // Lost a moment ago, while still wanted and in front: give it GRACE_MS to come back.
+  const active = wanted && (holding() || (visible() && now - lastActiveAt < GRACE_MS));
   const tapWouldHelp = video ? videoBlocked : lockNeedsTap;
   return {
     active,
@@ -88,6 +115,9 @@ export function wakeState(): WakeState {
 
 function emit() {
   const s = wakeState();
+  // Still inside a grace period: look again when it ends, so a real loss is told.
+  window.clearTimeout(graceTimer);
+  if (s.active && !holding()) graceTimer = window.setTimeout(emit, Math.max(50, lastActiveAt + GRACE_MS - Date.now() + 50));
   listeners.forEach((l) => l(s));
 }
 
@@ -105,8 +135,13 @@ function getVideo(): HTMLVideoElement {
   v.setAttribute("playsinline", "");
   v.setAttribute("webkit-playsinline", "");
   v.setAttribute("title", "NoticeBrd");
+  // Never let it reach its end: some engines pause, or fire pause and play,
+  // at the loop. Jumping back near the start keeps it playing without a seam.
   v.loop = true;
   v.preload = "auto";
+  v.addEventListener("timeupdate", () => {
+    if (v.currentTime > 1) v.currentTime = Math.random() * 0.5;
+  });
   for (const [src, type] of [
     ["/awake.webm", "video/webm"],
     ["/awake.mp4", "video/mp4"],
@@ -122,10 +157,26 @@ function getVideo(): HTMLVideoElement {
     videoPlaying = true;
     videoBlocked = false;
     // The lock already holds: no need to keep a video running.
-    if (!needsVideo() && sentinel && !sentinel.released) v.pause();
+    if (!needsVideo() && sentinel && !sentinel.released) pauseVideo();
     emit();
   });
   v.addEventListener("pause", () => {
+    if (!pausingVideo && wanted && visible() && needsVideo()) {
+      // Paused by the system, not by us: start it again. A video first played
+      // from a tap may play again without one.
+      const attempt = v.play();
+      if (attempt && typeof attempt.catch === "function") {
+        attempt.catch(() => {
+          videoPlaying = false;
+          // Going into the background pauses it before the page says it's hidden;
+          // only a refusal while in front means it needs a tap.
+          if (visible()) videoBlocked = true;
+          emit();
+        });
+      }
+      return;
+    }
+    pausingVideo = false;
     videoPlaying = false;
     emit();
   });
@@ -135,6 +186,12 @@ function getVideo(): HTMLVideoElement {
   });
   document.body.appendChild(v);
   return (video = v);
+}
+
+function pauseVideo() {
+  if (!video || video.paused) return;
+  pausingVideo = true;
+  video.pause();
 }
 
 /** Where a video with sound may only start from a tap, this must run straight from the tap handler. */
@@ -168,12 +225,23 @@ function takeLock(fromTap = false) {
       sentinel = s;
       lockNeedsTap = false;
       lockFailed = false;
-      if (video && videoPlaying && !needsVideo()) video.pause();
+      lockGrantedAt = Date.now();
+      if (videoPlaying && !needsVideo()) pauseVideo();
       s.addEventListener("release", () => {
         if (sentinel === s) sentinel = null;
+        if (wanted && visible()) {
+          // Taken back while still on show: the system can do that (Low
+          // Power Mode does it at once). Take it again, more slowly each
+          // time — and after two quick ones, let the video keep it awake.
+          quickReleases = Date.now() - lockGrantedAt < QUICK_RELEASE_MS ? quickReleases + 1 : 0;
+          if (quickReleases >= 2) {
+            lockFailed = true;
+            if (!videoPlaying) startVideo();
+          } else {
+            scheduleRetry(1_000 * 2 ** quickReleases);
+          }
+        }
         emit();
-        // Released while still showing (the system can do that): take it back.
-        if (wanted && visible()) scheduleRetry(1_000);
       });
     })
     .catch((err: { name?: string }) => {
@@ -199,7 +267,9 @@ function scheduleRetry(ms: number) {
 function acquire() {
   if (!wanted || !visible()) return emit();
   takeLock();
-  if (needsVideo() && !videoPlaying && !videoBlocked) startVideo();
+  // Worth a try even if it was refused before: a video once started by a tap
+  // can usually start again without one.
+  if (needsVideo() && !videoPlaying) startVideo();
   emit();
 }
 
@@ -212,9 +282,10 @@ export function keepAwake() {
 export function letSleep() {
   wanted = false;
   window.clearTimeout(retryTimer);
+  window.clearTimeout(graceTimer);
   void sentinel?.release().catch(() => undefined);
   sentinel = null;
-  video?.pause();
+  pauseVideo();
   emit();
 }
 

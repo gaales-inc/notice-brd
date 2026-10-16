@@ -30,6 +30,21 @@ const HEARTBEAT_MS = 20_000;
 /** The server pings every 20 s; this long without a word means the stream is dead. */
 const SILENCE_MS = 50_000;
 
+/**
+ * This page load's own id. The same screen can be open twice at once (a
+ * reload overlapping the old page; a Safari tab and the home-screen app), and
+ * the server keeps each copy's report apart rather than letting them overwrite
+ * one another.
+ */
+const CLIENT_ID = (() => {
+  const c = (window as Window & { crypto?: Crypto }).crypto;
+  if (c && typeof c.getRandomValues === "function") {
+    const bytes = c.getRandomValues(new Uint8Array(12));
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+})();
+
 /** The last state, so a screen reloaded without a connection carries on showing its message. */
 export const cachedState = () => load<ScreenState | null>(CACHE_KEY, null);
 
@@ -87,7 +102,7 @@ export function startScreen({ onState, onConnection, onUpdateReady }: ScreenCall
     helloInFlight = true;
     window.clearTimeout(retryTimer);
     try {
-      apply(await api<ScreenState>("POST", "/api/screen/hello", { device: describeDevice() }));
+      apply(await api<ScreenState>("POST", "/api/screen/hello", { device: describeDevice(), client: CLIENT_ID }));
       failures = 0;
       openEvents();
       void heartbeat();
@@ -103,7 +118,7 @@ export function startScreen({ onState, onConnection, onUpdateReady }: ScreenCall
     events?.close();
     events = null;
     if (typeof EventSource === "undefined") return; // The heartbeat carries the state instead.
-    const es = new EventSource("/api/screen/events");
+    const es = new EventSource(`/api/screen/events?client=${CLIENT_ID}`);
     events = es;
     lastHeard = Date.now();
     const heard = () => {
@@ -141,7 +156,13 @@ export function startScreen({ onState, onConnection, onUpdateReady }: ScreenCall
       const state = await api<ScreenState>(
         "POST",
         "/api/screen/status",
-        { awake: wake.active, visible: document.visibilityState !== "hidden", needsTap: wake.needsTap, battery: batteryReport() },
+        {
+          client: CLIENT_ID,
+          awake: wake.active,
+          visible: document.visibilityState !== "hidden",
+          needsTap: wake.needsTap,
+          battery: batteryReport(),
+        },
         10_000
       );
       if (state) apply(state);
@@ -167,7 +188,7 @@ export function startScreen({ onState, onConnection, onUpdateReady }: ScreenCall
   const beacon = () => {
     // Lets the dashboard show the screen as closed straight away.
     try {
-      navigator.sendBeacon?.("/api/screen/status", new Blob([JSON.stringify({ open: false })], { type: "text/plain" }));
+      navigator.sendBeacon?.("/api/screen/status", new Blob([JSON.stringify({ open: false, client: CLIENT_ID })], { type: "text/plain" }));
     } catch {
       /* best effort */
     }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { MAX_BOARD_NAME } from "../../../shared/style";
 import { api, ApiError } from "../api";
+import { refreshApp } from "../refresh";
 import { linkHandler, navigate } from "../router";
 import { getMode, setMode } from "../storage";
 import { BoardPage } from "./Board";
@@ -87,6 +88,10 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
       <a href="/dashboard" class="topbar-home" onClick={linkHandler("/dashboard")}>
         <Logo />
       </a>
+      <div class="topbar-actions">
+      <button class="icon-button" aria-label="Refresh" title="Refresh" onClick={() => void refreshApp()}>
+        <Icon name="refresh" />
+      </button>
       <div class="menu" ref={menu}>
         <button class="icon-button" aria-label="Account menu" aria-expanded={open} onClick={() => setOpen(!open)}>
           <Icon name="person" />
@@ -111,6 +116,7 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
             </button>
           </div>
         )}
+      </div>
       </div>
     </header>
   );

@@ -489,3 +489,55 @@ describe("battery", () => {
     unsubscribe();
   });
 });
+
+describe("a screen open more than once", () => {
+  it("is awake if the copy on show is, whatever a copy in the background says", async () => {
+    const { owner, boardId } = await makeBoard();
+    const s = await pair(owner, boardId);
+    const status = async () => (await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body.screens[0].status;
+
+    // The home-screen app, in front and awake…
+    await s.agent.post("/api/screen/status").send({ client: "app", awake: true, visible: true }).expect(200);
+    // …and a Safari tab with the same screen, in the background.
+    await s.agent.post("/api/screen/status").send({ client: "tab", awake: false, visible: false }).expect(200);
+    expect(await status()).toBe("awake");
+    await s.agent.post("/api/screen/status").send({ client: "app", awake: true, visible: true }).expect(200);
+    await s.agent.post("/api/screen/status").send({ client: "tab", awake: false, visible: false }).expect(200);
+    expect(await status()).toBe("awake");
+
+    // The app closes; the tab is still open.
+    await s.agent.post("/api/screen/status").send({ client: "app", open: false }).expect(204);
+    expect(await status()).toBe("open");
+
+    // The tab's heartbeats stop too.
+    ctx.clock.now += ONLINE_WINDOW_MS + 1000;
+    expect(await status()).toBe("offline");
+  });
+
+  it("doesn't let a reloading page's goodbye take the new page offline", async () => {
+    const { owner, boardId } = await makeBoard();
+    const s = await pair(owner, boardId);
+    await s.agent.post("/api/screen/status").send({ client: "old", awake: true, visible: true }).expect(200);
+    // The new page arrives before the old one's beacon.
+    await s.agent.post("/api/screen/hello").send({ client: "new" }).expect(200);
+    await s.agent.post("/api/screen/status").send({ client: "new", awake: true, visible: true }).expect(200);
+    await s.agent.post("/api/screen/status").send({ client: "old", open: false }).expect(204);
+    expect((await owner.agent.get(`/api/boards/${boardId}`).expect(200)).body.screens[0].status).toBe("awake");
+  });
+
+  it("doesn't tell dashboards anything when a copy repeats itself", async () => {
+    const { owner, boardId } = await makeBoard();
+    const s = await pair(owner, boardId);
+    await s.agent.post("/api/screen/status").send({ client: "app", awake: true, visible: true }).expect(200);
+    await new Promise((r) => setTimeout(r, 80));
+    let changes = 0;
+    const unsubscribe = ctx.hub.subscribeBoard(boardId, () => changes++);
+    for (let i = 0; i < 3; i++) {
+      await s.agent.post("/api/screen/status").send({ client: "app", awake: true, visible: true }).expect(200);
+      await s.agent.post("/api/screen/status").send({ client: "tab", awake: false, visible: false }).expect(200);
+    }
+    await new Promise((r) => setTimeout(r, 80));
+    expect(changes).toBe(0);
+    unsubscribe();
+  });
+});
