@@ -1668,6 +1668,102 @@ textarea {
   gap: 6px 0;
 }
 
+.cal-chip.over {
+  opacity: 0.6;
+}
+
+/* ------------------------------------------------------------ schedules */
+
+.slot-list {
+  list-style: none;
+  margin: 10px 0 6px;
+  padding: 0;
+}
+
+.slot {
+  padding: 10px 12px 12px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.slot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.slot-times {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.slot-times .field.compact {
+  margin: 10px 0 0;
+  min-width: 0;
+}
+
+/* iOS centres date and time values and lets an empty field collapse. */
+input[type="time"],
+input[type="datetime-local"] {
+  -webkit-appearance: none;
+  appearance: none;
+  text-align: left;
+  min-width: 0;
+}
+
+input::-webkit-date-and-time-value {
+  text-align: left;
+}
+
+.day-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.day-picker button {
+  min-width: 46px;
+  min-height: 36px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.day-picker button.selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.check.all-day {
+  margin-top: 12px;
+}
+
+.slot-note {
+  margin: 8px 0 0;
+}
+
+.add-slot {
+  margin: 0 0 4px;
+}
+
+@media (max-width: 560px) {
+  .slot-times {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
+
 .meeting-row {
   margin: 8px 0 0 20px;
   line-height: 1.6;

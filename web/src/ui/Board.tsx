@@ -1,9 +1,25 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { nextStart, Schedule, slotProblem } from "../../../shared/schedule";
 import { COLORS, DEFAULT_STYLE, Display, MAX_BOARD_NAME, MAX_MESSAGE_LENGTH, MAX_SCREEN_NAME, Size, Speed } from "../../../shared/style";
 import { api, ApiError } from "../api";
 import { linkHandler, navigate } from "../router";
-import { Battery, BatteryBadge, Icon, isLowBattery, Modal, ScreenStatus, STATUS_LABEL, StatusDot, timeAgo, toast, useTick } from "./common";
+import {
+  Battery,
+  BatteryBadge,
+  Icon,
+  isLowBattery,
+  Modal,
+  ScreenChooser,
+  ScreenStatus,
+  Segmented,
+  STATUS_LABEL,
+  StatusDot,
+  timeAgo,
+  toast,
+  useTick,
+} from "./common";
 import { Marquee } from "./Marquee";
+import { blankSchedule, SchedulePicker, slotText, untilText, usableZone, whenText } from "./Schedule";
 
 interface CalendarSetting {
   enabled: boolean;
@@ -25,8 +41,12 @@ interface Message {
   /** Where it was broadcast. */
   screenIds: string[];
   calendar: CalendarSetting;
+  /** Set times it shows by itself; null if none. */
+  schedule: Schedule | null;
   /** Where a meeting has put it right now. */
   meeting: { title: string; end: string; screenIds: string[] } | null;
+  /** Where its schedule has put it right now; `end` is null when it runs on past the next two weeks. */
+  scheduled: { end: string | null; screenIds: string[] } | null;
 }
 
 interface Screen {
@@ -39,6 +59,7 @@ interface Screen {
   needsTap: boolean;
   lastSeenAt: string | null;
   meeting: { messageId: string; title: string; end: string } | null;
+  scheduled: { messageId: string; end: string | null } | null;
   battery: Battery;
 }
 
@@ -76,6 +97,9 @@ interface Draft {
   size: Size;
   display: Display;
   calendar: CalendarSetting;
+  scheduleOn: boolean;
+  /** Kept while it's switched off, so switching back on doesn't lose the times. */
+  schedule: Schedule;
 }
 
 /** Runs an API call, reports its error as a toast, and reloads the board either way. */
@@ -181,7 +205,7 @@ export function BoardPage({ boardId }: { boardId: string }) {
   if (!data) return error ? <p class="error">{error}</p> : <p class="faint">Loading…</p>;
 
   const awake = data.screens.filter((s) => s.status === "awake").length;
-  const onAir = data.messages.filter((m) => m.screenIds.length || m.meeting).length;
+  const onAir = data.messages.filter((m) => m.screenIds.length || m.meeting || m.scheduled).length;
   const lowScreens = data.screens.filter((s) => s.status !== "offline" && isLowBattery(s.battery));
 
   return (
@@ -405,7 +429,6 @@ function CalendarPicker({
   calendars: Calendar[];
 }) {
   const none = calendars.length === 0;
-  const chosen = value.screenIds ?? [];
   return (
     <div class="auto-cal">
       <label class={`check${none ? " disabled" : ""}`}>
@@ -435,58 +458,13 @@ function CalendarPicker({
                 ))}
             </select>
           </label>
-          <div class="field compact">
-            <span>Show it on</span>
-            <label class="check">
-              <input
-                type="checkbox"
-                checked={value.screenIds === null}
-                onChange={(e) => onChange({ ...value, screenIds: (e.target as HTMLInputElement).checked ? null : screens.map((s) => s.id) })}
-              />
-              <span>All screens</span>
-            </label>
-            {value.screenIds !== null &&
-              screens.map((s) => (
-                <label class="check indent" key={s.id}>
-                  <input
-                    type="checkbox"
-                    checked={chosen.includes(s.id)}
-                    onChange={() =>
-                      onChange({ ...value, screenIds: chosen.includes(s.id) ? chosen.filter((id) => id !== s.id) : [...chosen, s.id] })
-                    }
-                  />
-                  <span>{s.name}</span>
-                </label>
-              ))}
-          </div>
+          <ScreenChooser value={value.screenIds} onChange={(screenIds) => onChange({ ...value, screenIds })} screens={screens} />
           <p class="faint small auto-cal-note">
             It comes on when a meeting with a Meet, Zoom, Teams or other call link starts, and goes off when it ends — then each screen
             goes back to what it was showing.
           </p>
         </div>
       )}
-    </div>
-  );
-}
-
-function Segmented<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: T;
-  options: Record<T, string>;
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div class="segmented" role="radiogroup" aria-label={label}>
-      {(Object.keys(options) as T[]).map((k) => (
-        <button key={k} type="button" role="radio" aria-checked={value === k} class={value === k ? "selected" : ""} onClick={() => onChange(k)}>
-          {options[k]}
-        </button>
-      ))}
     </div>
   );
 }
@@ -509,38 +487,69 @@ function Composer({
   onBroadcast?: (m: Message) => void;
   onDone?: () => void;
 }) {
-  const blank: Draft = { text: "", ...DEFAULT_STYLE, calendar: { enabled: false, calendarId: null, screenIds: null } };
-  const [draft, setDraft] = useState<Draft>(
+  const blank = (): Draft => ({
+    text: "",
+    ...DEFAULT_STYLE,
+    calendar: { enabled: false, calendarId: null, screenIds: null },
+    scheduleOn: false,
+    schedule: blankSchedule(),
+  });
+  const [draft, setDraft] = useState<Draft>(() =>
     message
-      ? { text: message.text, color: message.color, speed: message.speed, size: message.size, display: message.display, calendar: message.calendar }
-      : blank
+      ? {
+          text: message.text,
+          color: message.color,
+          speed: message.speed,
+          size: message.size,
+          display: message.display,
+          calendar: message.calendar,
+          scheduleOn: !!message.schedule,
+          schedule: message.schedule ?? blankSchedule(),
+        }
+      : blank()
   );
   const [busy, setBusy] = useState(false);
   const [focused, setFocused] = useState(!!message);
   const expanded = focused || draft.text.length > 0;
   const text = draft.text.trim();
+  const zone = usableZone(draft.schedule.timeZone);
+  const unfinished = draft.scheduleOn && draft.schedule.slots.some((slot) => slotProblem(slot, zone));
+  const automatic = draft.calendar.enabled || draft.scheduleOn;
 
   const save = async (thenBroadcast: boolean) => {
-    if (!text) return;
+    if (!text || unfinished) return;
     setBusy(true);
     let created: Message | null = null;
+    const schedule = draft.scheduleOn ? draft.schedule : null;
+    const body = { text, color: draft.color, speed: draft.speed, size: draft.size, display: draft.display, calendar: draft.calendar, schedule };
+    const done = message
+      ? message.screenIds.length
+        ? "Saved — the screens show the new version"
+        : "Saved"
+      : thenBroadcast
+        ? undefined
+        : draft.scheduleOn
+          ? "Saved — it will show at its set times"
+          : draft.calendar.enabled
+            ? "Saved — it will show during meetings"
+            : "Message saved";
     const ok = await act(async () => {
       if (message) {
-        await api("PATCH", `/api/boards/${boardId}/messages/${message.id}`, { ...draft, text });
+        await api("PATCH", `/api/boards/${boardId}/messages/${message.id}`, body);
       } else {
         const r = await api<{ message: Pick<Message, "id" | "text" | "color" | "speed" | "size" | "display"> }>(
           "POST",
           `/api/boards/${boardId}/messages`,
-          { ...draft, text }
+          body
         );
-        created = { ...r.message, screenIds: [], createdAt: "", updatedAt: "", calendar: draft.calendar, meeting: null };
+        created = { ...r.message, screenIds: [], createdAt: "", updatedAt: "", calendar: draft.calendar, schedule, meeting: null, scheduled: null };
       }
-    }, message ? (message.screenIds.length ? "Saved — the screens show the new version" : "Saved") : thenBroadcast ? undefined : draft.calendar.enabled ? "Saved — it will show during meetings" : "Message saved");
+    }, done);
     setBusy(false);
     if (!ok) return;
     if (message) onDone?.();
     else {
-      setDraft({ ...blank, color: draft.color, speed: draft.speed, size: draft.size, display: draft.display });
+      setDraft({ ...blank(), color: draft.color, speed: draft.speed, size: draft.size, display: draft.display });
       setFocused(false);
       if (thenBroadcast && created) onBroadcast?.(created);
     }
@@ -576,6 +585,12 @@ function Composer({
             <Marquee message={{ ...draft, text: text || PLACEHOLDER[draft.display] }} />
           </div>
           <CalendarPicker value={draft.calendar} onChange={(calendar) => setDraft({ ...draft, calendar })} screens={screens} calendars={calendars} />
+          <SchedulePicker
+            on={draft.scheduleOn}
+            value={draft.schedule}
+            onChange={(scheduleOn, schedule) => setDraft({ ...draft, scheduleOn, schedule })}
+            screens={screens}
+          />
           <div class="composer-foot">
             <span class="faint counter">
               {draft.text.length}/{MAX_MESSAGE_LENGTH}
@@ -585,16 +600,16 @@ function Composer({
                 <button type="button" class="button subtle" onClick={onDone}>
                   Cancel
                 </button>
-                <button class="button primary" disabled={busy || !text}>
+                <button class="button primary" disabled={busy || !text || unfinished}>
                   Save changes
                 </button>
               </>
             ) : (
               <>
-                <button type="button" class="button" disabled={busy || !text} onClick={() => void save(false)}>
-                  {draft.calendar.enabled ? "Save" : "Save for later"}
+                <button type="button" class="button" disabled={busy || !text || unfinished} onClick={() => void save(false)}>
+                  {automatic ? "Save" : "Save for later"}
                 </button>
-                <button class="button primary" disabled={busy || !text}>
+                <button class="button primary" disabled={busy || !text || unfinished}>
                   <Icon name="broadcast" />
                   <span>Broadcast…</span>
                 </button>
@@ -627,7 +642,8 @@ function MessageCard({
   const url = `/api/boards/${boardId}/messages/${message.id}`;
   const on = screens.filter((s) => message.screenIds.includes(s.id));
   const duringMeeting = message.meeting ? screens.filter((s) => message.meeting!.screenIds.includes(s.id)) : [];
-  const live = on.length > 0 || duringMeeting.length > 0;
+  const scheduledOn = message.scheduled ? screens.filter((s) => message.scheduled!.screenIds.includes(s.id)) : [];
+  const live = on.length > 0 || duringMeeting.length > 0 || scheduledOn.length > 0;
 
   if (editing) {
     return (
@@ -647,6 +663,22 @@ function MessageCard({
   const next = following
     .flatMap((c) => c.upcoming)
     .sort((a, b) => a.start.localeCompare(b.start))[0];
+  const schedule = message.schedule;
+  const zone = usableZone(schedule?.timeZone ?? "");
+  const now = Date.now();
+  const nextScheduled = schedule ? nextStart(schedule, now) : null;
+  const automatic = cal.enabled || !!schedule;
+  const screenCount = (ids: string[] | null) => {
+    if (!ids) return "all screens";
+    const n = ids.filter((id) => screens.some((s) => s.id === id)).length;
+    return `${n} ${n === 1 ? "screen" : "screens"}`;
+  };
+
+  const offAir: string[] = [];
+  if (schedule) offAir.push(nextScheduled ? `Next scheduled: ${whenText(nextScheduled, zone, now)}` : "Its scheduled times are over");
+  if (cal.enabled) {
+    offAir.push(next ? `Next meeting: “${next.title}”, ${day(next.start)} ${clock(next.start)}` : "It comes on during the next meeting with a call link");
+  }
 
   return (
     <li class={`message-card${live ? " live" : ""}`}>
@@ -663,7 +695,14 @@ function MessageCard({
             <Icon name="calendar" />
             During meetings
             {cal.calendarId && following[0] ? ` on ${following[0].name}` : ""}
-            {cal.screenIds ? ` · ${cal.screenIds.length} ${cal.screenIds.length === 1 ? "screen" : "screens"}` : " · all screens"}
+            {` · ${screenCount(cal.screenIds)}`}
+          </span>
+        )}
+        {schedule && (
+          <span class={`cal-chip${!message.scheduled && !nextScheduled ? " over" : ""}`} title="Shows by itself at set times">
+            <Icon name="clock" />
+            {schedule.slots.length === 1 ? slotText(schedule.slots[0]!) : `${schedule.slots.length} set times`}
+            {` · ${screenCount(schedule.screenIds)}`}
           </span>
         )}
       </div>
@@ -676,26 +715,27 @@ function MessageCard({
           <ScreenChips screens={duringMeeting} />
         </div>
       )}
-      {on.length > 0 && (
+      {message.scheduled && (
         <div class="on-screens">
           {!message.meeting && <span class="on-air-badge">On air</span>}
+          <span class="on-screens-label">
+            {message.scheduled.end ? `Scheduled until ${untilText(new Date(message.scheduled.end).getTime(), zone, now)}, on` : "Scheduled, on"}
+          </span>
+          <ScreenChips screens={scheduledOn} />
+        </div>
+      )}
+      {on.length > 0 && (
+        <div class="on-screens">
+          {!message.meeting && !message.scheduled && <span class="on-air-badge">On air</span>}
           <span class="on-screens-label">Broadcasting on</span>
           <ScreenChips screens={on} />
         </div>
       )}
-      {!live && (
-        <p class="faint off-air">
-          {cal.enabled
-            ? next
-              ? `Not on air. Next meeting: “${next.title}”, ${day(next.start)} ${clock(next.start)}`
-              : "Not on air. It comes on during the next meeting with a call link."
-            : "Not broadcasting"}
-        </p>
-      )}
+      {!live && <p class="faint off-air">{offAir.length ? `Not on air. ${offAir.join(". ")}.` : "Not broadcasting"}</p>}
       <div class="row-actions">
-        <button class={`button${on.length || cal.enabled ? "" : " primary"}`} onClick={onBroadcast}>
+        <button class={`button${on.length || automatic ? "" : " primary"}`} onClick={onBroadcast}>
           <Icon name="broadcast" />
-          <span>{on.length ? "Change screens" : cal.enabled ? "Broadcast now" : "Broadcast"}</span>
+          <span>{on.length ? "Change screens" : automatic ? "Broadcast now" : "Broadcast"}</span>
         </button>
         {on.length > 0 && (
           <button class="button" onClick={() => void act(() => api("POST", `${url}/stop`), "Stopped — those screens are black")}>
@@ -881,6 +921,8 @@ function ScreenRow({ boardId, screen, messages, act }: { boardId: string; screen
   };
 
   const meetingMessage = screen.meeting ? messages.find((m) => m.id === screen.meeting!.messageId) : null;
+  const scheduledMessage = screen.scheduled ? messages.find((m) => m.id === screen.scheduled!.messageId) : null;
+  const short = (text: string) => (text.length > 40 ? `${text.slice(0, 37)}…` : text);
 
   return (
     <li class={`screen-row status-${screen.status}`}>
@@ -903,12 +945,18 @@ function ScreenRow({ boardId, screen, messages, act }: { boardId: string; screen
       )}
       {screen.meeting && meetingMessage && (
         <p class="meeting-row small">
-          <span class="on-air-badge">On air</span> “{meetingMessage.text.length > 40 ? `${meetingMessage.text.slice(0, 37)}…` : meetingMessage.text}”
-          during “{screen.meeting.title}”, until {clock(screen.meeting.end)}
+          <span class="on-air-badge">On air</span> “{short(meetingMessage.text)}” during “{screen.meeting.title}”, until {clock(screen.meeting.end)}
+        </p>
+      )}
+      {screen.scheduled && scheduledMessage && (
+        <p class="meeting-row small">
+          <span class="on-air-badge">On air</span> “{short(scheduledMessage.text)}”, scheduled
+          {screen.scheduled.end &&
+            ` until ${untilText(new Date(screen.scheduled.end).getTime(), usableZone(scheduledMessage.schedule?.timeZone ?? ""))}`}
         </p>
       )}
       <label class="field compact">
-        <span>{screen.meeting ? "Shows after the meeting" : "Showing"}</span>
+        <span>{screen.meeting ? "Shows after the meeting" : screen.scheduled ? "Shows after the scheduled time" : "Showing"}</span>
         <select
           value={screen.messageId ?? ""}
           onChange={(e) => {

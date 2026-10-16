@@ -12,7 +12,7 @@ import { Request, Response, Router } from "express";
 import { newToken, sha256 } from "./auth";
 import { readCookie, SCREEN_COOKIE, setCookie } from "./cookies";
 import { Db, Queryable } from "./db";
-import type { CalendarOverride } from "./calendar";
+import type { AutoOverride } from "./calendar";
 import { Hub, openStream } from "./hub";
 
 export const PAIR_CODE_TTL_MINUTES = 30;
@@ -85,14 +85,14 @@ export function cleanDeviceName(value: unknown): string {
 /** Server state shared by the routers: the database, live connections and the build. */
 export class Live {
   /**
-   * Screens a meeting is putting a message on right now (see calendar.ts).
-   * Kept apart from the screen's own message_id, which is what it goes back
-   * to when the meeting ends.
+   * Screens a meeting or a schedule is putting a message on right now (see
+   * calendar.ts). Kept apart from the screen's own message_id, which is what
+   * it goes back to afterwards.
    */
-  readonly overrides = new Map<string, CalendarOverride>();
-  /** Re-works out the board's meeting-driven messages; set once the calendar sync exists. */
-  evaluateCalendar: (boardId: string) => Promise<void> = async () => {};
-  /** The clock meetings are judged by. */
+  readonly overrides = new Map<string, AutoOverride>();
+  /** Re-works out the board's meeting- and schedule-driven messages; set once the calendar sync exists. */
+  evaluateAuto: (boardId: string) => Promise<void> = async () => {};
+  /** The clock meetings and schedules are judged by. */
   now: () => number = Date.now;
 
   constructor(
@@ -101,13 +101,13 @@ export class Live {
     readonly version: string
   ) {}
 
-  /** The override for a screen, if a meeting on its own board is putting a message on it. */
-  override(screenId: string, boardId: string | null): CalendarOverride | null {
+  /** The override for a screen, if a meeting or schedule on its own board is putting a message on it. */
+  override(screenId: string, boardId: string | null): AutoOverride | null {
     const o = this.overrides.get(screenId);
     return o && o.boardId === boardId ? o : null;
   }
 
-  /** Puts meeting-driven messages in place of the screens' own. */
+  /** Puts meeting- and schedule-driven messages in place of the screens' own. */
   private async withOverrides(rows: ScreenRow[]): Promise<ScreenRow[]> {
     const wanted = new Map<string, string>();
     for (const row of rows) {

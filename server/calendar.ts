@@ -12,9 +12,12 @@
  * A message set to show during meetings goes on its screens when one of those
  * meetings starts and comes off when the last one ends. It doesn't replace
  * what the screen was told to show: when the meeting is over, the screen goes
- * back to that.
+ * back to that. Messages scheduled for set times (shared/schedule.ts) come and
+ * go the same way, worked out alongside.
  */
 import ICAL from "ical.js";
+import { currentSpan, Schedule } from "../shared/schedule";
+import { zonedToEpoch } from "../shared/zones";
 import { Db } from "./db";
 import type { Live } from "./screens";
 
@@ -27,13 +30,16 @@ export interface Meeting {
   link: string;
 }
 
-/** The overrides a meeting puts in place: screen → what it shows meanwhile. */
-export interface CalendarOverride {
+/** What a meeting or a scheduled time puts on a screen meanwhile. */
+export interface AutoOverride {
   boardId: string;
   messageId: string;
-  calendarId: string;
-  title: string;
-  end: number;
+  kind: "meeting" | "schedule";
+  /** The meeting's calendar and title; null for a scheduled time. */
+  calendarId: string | null;
+  title: string | null;
+  /** Epoch ms it comes off; null for a schedule that keeps it on past the next two weeks. */
+  end: number | null;
 }
 
 export const FETCH_EVERY_MS = 3 * 60_000;
@@ -132,34 +138,6 @@ export const fetchFeed: FeedFetcher = async (url) => {
 export class FeedError extends Error {}
 
 // ----------------------------------------------------------------- parsing
-
-/** Wall-clock time in a named zone → epoch ms, via Intl (for feeds that name a zone but don't define it). */
-function zonedToEpoch(parts: [number, number, number, number, number, number], zone: string): number | null {
-  try {
-    const fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: zone,
-      hourCycle: "h23",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-    const offsetAt = (epoch: number) => {
-      const p = Object.fromEntries(fmt.formatToParts(new Date(epoch)).map((x) => [x.type, x.value]));
-      const asUtc = Date.UTC(+p.year!, +p.month! - 1, +p.day!, +p.hour!, +p.minute!, +p.second!);
-      return asUtc - epoch;
-    };
-    const naive = Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4], parts[5]);
-    let epoch = naive - offsetAt(naive);
-    // Once more, in case the guess landed on the other side of a DST change.
-    epoch = naive - offsetAt(epoch);
-    return epoch;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * A time from the feed → epoch ms. ical.js converts times in zones the feed
@@ -280,17 +258,24 @@ export function meetingsFromIcs(ics: string, from: number, to: number): Meeting[
 
 interface AutoMessage {
   id: string;
+  auto_calendar: boolean;
   auto_calendar_id: string | null;
   auto_screen_ids: string[] | null;
+  schedule: Schedule | null;
 }
 
+const onScreen = (screenIds: string[] | null, screenId: string) => !Array.isArray(screenIds) || screenIds.includes(screenId);
+
 /**
- * Fetches feeds when they're due and, every 15 s, works out which screens a
- * meeting is putting a message on. Also run straight after anything that could
- * change the answer: a message's settings, a new calendar, a screen moving.
+ * Fetches feeds when they're due and, every 15 s and just after each whole
+ * minute (when scheduled times start and end), works out which screens a
+ * meeting or a schedule is putting a message on. Also run straight after
+ * anything that could change the answer: a message's settings, a new
+ * calendar, a screen moving.
  */
 export class CalendarSync {
   private timers: NodeJS.Timeout[] = [];
+  private minuteTimer: NodeJS.Timeout | null = null;
   private syncing = new Set<string>();
 
   constructor(
@@ -311,12 +296,21 @@ export class CalendarSync {
     };
     tick(() => this.syncDue(), 30_000);
     tick(() => this.evaluateAll(), 15_000);
+    const onTheMinute = () => {
+      this.minuteTimer = setTimeout(() => {
+        void this.evaluateAll().catch((err) => console.error("Calendar job failed:", err));
+        onTheMinute();
+      }, 60_000 - (this.now() % 60_000) + 250);
+      this.minuteTimer.unref();
+    };
+    onTheMinute();
     void this.evaluateAll().catch((err) => console.error("Calendar job failed:", err));
     void this.syncDue().catch((err) => console.error("Calendar job failed:", err));
   }
 
   stop() {
     for (const t of this.timers) clearInterval(t);
+    if (this.minuteTimer) clearTimeout(this.minuteTimer);
   }
 
   /** Fetches the feeds not fetched for a while. */
@@ -369,41 +363,51 @@ export class CalendarSync {
 
   async evaluateAll() {
     const { rows } = await this.db.query<{ board_id: string }>(
-      "SELECT DISTINCT board_id FROM messages WHERE auto_calendar"
+      "SELECT DISTINCT board_id FROM messages WHERE auto_calendar OR schedule IS NOT NULL"
     );
     const boards = new Set(rows.map((r) => r.board_id));
-    // Boards whose last meeting-driven message needs taking down.
+    // Boards whose last meeting- or schedule-driven message needs taking down.
     for (const o of this.live.overrides.values()) boards.add(o.boardId);
     for (const id of boards) await this.evaluate(id);
   }
 
-  /** Works out which of the board's screens a meeting is putting a message on right now. */
+  /** Works out which of the board's screens a meeting or a schedule is putting a message on right now. */
   async evaluate(boardId: string) {
     const now = this.now();
     const [{ rows: messages }, { rows: calendars }, { rows: screens }] = await Promise.all([
       this.db.query<AutoMessage>(
-        `SELECT id, auto_calendar_id, auto_screen_ids FROM messages
-          WHERE board_id = $1 AND auto_calendar ORDER BY updated_at DESC, id`,
+        `SELECT id, auto_calendar, auto_calendar_id, auto_screen_ids, schedule FROM messages
+          WHERE board_id = $1 AND (auto_calendar OR schedule IS NOT NULL) ORDER BY updated_at DESC, id`,
         [boardId]
       ),
       this.db.query<{ id: string; meetings: Meeting[] }>("SELECT id, meetings FROM calendars WHERE board_id = $1", [boardId]),
       this.db.query<{ id: string }>("SELECT id FROM screens WHERE board_id = $1", [boardId]),
     ]);
 
-    const next = new Map<string, CalendarOverride>();
+    const next = new Map<string, AutoOverride>();
     for (const m of messages) {
-      const sources = calendars.filter((c) => !m.auto_calendar_id || c.id === m.auto_calendar_id);
       let live: { meeting: Meeting; calendarId: string } | null = null;
-      for (const c of sources) {
-        for (const meeting of c.meetings ?? []) {
-          if (meeting.start <= now && now < meeting.end && (!live || meeting.end > live.meeting.end)) live = { meeting, calendarId: c.id };
+      if (m.auto_calendar) {
+        for (const c of calendars.filter((c) => !m.auto_calendar_id || c.id === m.auto_calendar_id)) {
+          for (const meeting of c.meetings ?? []) {
+            if (meeting.start <= now && now < meeting.end && (!live || meeting.end > live.meeting.end)) live = { meeting, calendarId: c.id };
+          }
         }
       }
-      if (!live) continue;
-      const targets = Array.isArray(m.auto_screen_ids) ? screens.filter((s) => m.auto_screen_ids!.includes(s.id)) : screens;
-      for (const s of targets) {
+      let scheduled: { end: number | null } | null = null;
+      try {
+        scheduled = m.schedule ? currentSpan(m.schedule, now) : null;
+      } catch {
+        /* one bad schedule mustn't stop the rest */
+      }
+      if (!live && !scheduled) continue;
+      for (const s of screens) {
         if (next.has(s.id)) continue; // the most recently edited message wins a screen
-        next.set(s.id, { boardId, messageId: m.id, calendarId: live.calendarId, title: live.meeting.title, end: live.meeting.end });
+        if (live && onScreen(m.auto_screen_ids, s.id)) {
+          next.set(s.id, { boardId, messageId: m.id, kind: "meeting", calendarId: live.calendarId, title: live.meeting.title, end: live.meeting.end });
+        } else if (scheduled && onScreen(m.schedule!.screenIds, s.id)) {
+          next.set(s.id, { boardId, messageId: m.id, kind: "schedule", calendarId: null, title: null, end: scheduled.end });
+        }
       }
     }
 
@@ -411,7 +415,7 @@ export class CalendarSync {
     for (const [screenId, o] of this.live.overrides) {
       if (o.boardId !== boardId) continue;
       const n = next.get(screenId);
-      if (!n || n.messageId !== o.messageId || n.end !== o.end || n.title !== o.title) {
+      if (!n || n.messageId !== o.messageId || n.kind !== o.kind || n.end !== o.end || n.title !== o.title) {
         this.live.overrides.delete(screenId);
         changed = true;
       }
