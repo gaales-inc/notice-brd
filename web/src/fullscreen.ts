@@ -1,4 +1,4 @@
-import { detectPlatform } from "./device";
+import { detectPlatform, inNativeApp } from "./device";
 import { isStandalone } from "./install";
 
 /**
@@ -13,7 +13,8 @@ import { isStandalone } from "./install";
  * iPhone and iPad keep their status bar whatever a web page does (WebKit bugs
  * 264220 and 272392). In Safari, full screen still hides Safari's own bars; an
  * app on the home screen has none to hide, and the black page drawn under the
- * status bar is as far as a web app can go there.
+ * status bar is as far as a web app can go there. The NoticeBrd app for
+ * iPhone and iPad (ios/) hides it, and is full screen already.
  */
 
 type FullscreenDoc = Document & {
@@ -35,9 +36,9 @@ export function canFullscreen(): boolean {
 
 export const isFullscreen = () => !!(document.fullscreenElement || (document as FullscreenDoc).webkitFullscreenElement);
 
-/** The window is already as full as it gets: an installed full-screen app, a browser in full-screen mode, or an iOS home-screen app. */
+/** The window is already as full as it gets: an installed full-screen app, a browser in full-screen mode, an iOS home-screen app or the NoticeBrd app. */
 export function windowIsFullscreen(): boolean {
-  if (detectPlatform() === "ios" && isStandalone()) return true;
+  if (inNativeApp() || (detectPlatform() === "ios" && isStandalone())) return true;
   return typeof window.matchMedia === "function" && window.matchMedia("(display-mode: fullscreen)").matches;
 }
 
