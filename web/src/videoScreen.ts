@@ -100,6 +100,11 @@ function makeVideo(source: MediaStream): FullscreenVideo {
   // Behind the black page: there, but nothing to see until it's full screen.
   v.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;z-index:-1;pointer-events:none";
   v.srcObject = source;
+  // Nothing stops the message: the player's pause button, a keyboard's, or iOS
+  // pausing it on the way out of full screen — it plays straight on again.
+  v.addEventListener("pause", () => {
+    if (video === v && document.visibilityState === "visible") play();
+  });
   v.addEventListener("webkitbeginfullscreen", () => {
     fullscreen = true;
     notify();
