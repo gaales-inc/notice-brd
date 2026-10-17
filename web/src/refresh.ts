@@ -6,9 +6,13 @@
  * the reload gets the latest NoticeBrd.
  */
 export async function refreshApp() {
-  try {
+  // All of it under the time limit: asking for the registration can hang too.
+  const check = async () => {
     const registration = await navigator.serviceWorker?.getRegistration();
-    if (registration) await Promise.race([registration.update(), new Promise((r) => window.setTimeout(r, 1500))]);
+    await registration?.update();
+  };
+  try {
+    await Promise.race([check(), new Promise((r) => window.setTimeout(r, 1500))]);
   } catch {
     /* reload anyway */
   }

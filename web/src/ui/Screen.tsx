@@ -5,6 +5,16 @@ import { refreshApp } from "../refresh";
 import { navigate } from "../router";
 import { Connection, ScreenState, cachedState, startScreen, unpairScreen } from "../screenClient";
 import { setMode } from "../storage";
+import {
+  enterVideoFullscreen,
+  exitVideoFullscreen,
+  inVideoFullscreen,
+  onVideoFullscreenChange,
+  showOnVideo,
+  startVideoScreen,
+  stopVideoScreen,
+  videoFullscreenAvailable,
+} from "../videoScreen";
 import { keepAwake, letSleep, nudge, onWakeChange, WakeState, wakeState } from "../wake";
 import { Icon, InstallButton, Logo } from "./common";
 import { Marquee } from "./Marquee";
@@ -20,10 +30,11 @@ function useWake(): WakeState {
  * or nothing at all — no clock, no logo — so an OLED panel lights no pixels.
  * Either way the screen is kept awake.
  *
- * A tap takes it full screen, where the browser allows (see fullscreen.ts),
- * and shows a Refresh button in the corner for three seconds — a home-screen
- * app has no other way to reload. Three quick taps open the screen's panel:
- * what it is, how it's doing, and its options. Taps land as clicks straight
+ * A tap takes it full screen, where the browser allows (see fullscreen.ts);
+ * on iPhone and iPad as a video, the one way past the status bar there (see
+ * videoScreen.ts). A tap also shows a Refresh button in the corner for three
+ * seconds — a home-screen app has no other way to reload. Three quick taps
+ * open the screen's panel: what it is, how it's doing, and its options. Taps land as clicks straight
  * away (`touch-action: manipulation`), so a triple tap isn't eaten by zoom.
  * A mouse pointer left still hides, as over a video.
  */
@@ -43,6 +54,11 @@ export function ScreenPage() {
   const [fullscreenHint, setFullscreenHint] = useState(false);
   const [pointerIdle, setPointerIdle] = useState(false);
   const [, setFullscreen] = useState(isFullscreen);
+  /** iPhone and iPad: full screen is the video's. */
+  const [useVideo] = useState(videoFullscreenAvailable);
+  const [videoFull, setVideoFull] = useState(false);
+  /** Someone swiped out of the video: taps are for the page until they choose Full screen again. */
+  const leftVideo = useRef(false);
   const hideTimer = useRef<number>();
   const refreshTimer = useRef<number>();
   const taps = useRef({ count: 0, last: 0 });
@@ -56,32 +72,47 @@ export function ScreenPage() {
     const slowTimer = window.setTimeout(() => setSlow(true), 4000);
 
     const stopWatching = onFullscreenChange(() => setFullscreen(isFullscreen()));
-    // iPhone and iPad already ask for a tap, to keep the screen awake; elsewhere, say what a tap does.
+    let stopVideoWatch = () => {};
+    if (useVideo) {
+      startVideoScreen();
+      stopVideoWatch = onVideoFullscreenChange(() => {
+        const on = inVideoFullscreen();
+        if (!on) leftVideo.current = true;
+        setVideoFull(on);
+      });
+    }
+    // Say what a tap does (an iPhone or iPad waiting for its keep-awake tap says it in the tap prompt).
     let hintTimer: number | undefined;
-    if (fullscreenOnTap() && detectPlatform() !== "ios") {
+    if (useVideo || fullscreenOnTap()) {
       setFullscreenHint(true);
       hintTimer = window.setTimeout(() => setFullscreenHint(false), FULLSCREEN_HINT_MS);
     }
 
+    // A mouse only: a tap on a touch screen also reports a mouse move, and
+    // changing the page in answer to it can make Safari drop the tap.
     let pointerTimer: number | undefined;
-    const pointerMoved = () => {
+    const moveEvent = "PointerEvent" in window ? "pointermove" : "mousemove";
+    const pointerMoved = (e: Event) => {
+      if ((e as PointerEvent).pointerType && (e as PointerEvent).pointerType !== "mouse") return;
       setPointerIdle(false);
       window.clearTimeout(pointerTimer);
       pointerTimer = window.setTimeout(() => setPointerIdle(true), POINTER_HIDES_MS);
     };
-    pointerMoved();
-    window.addEventListener("mousemove", pointerMoved);
+    pointerTimer = window.setTimeout(() => setPointerIdle(true), POINTER_HIDES_MS);
+    window.addEventListener(moveEvent, pointerMoved);
 
     return () => {
       stop();
       letSleep();
       stopWatching();
+      stopVideoWatch();
       // Off to the dashboard: that's a page, not a screen.
       exitFullscreen(false);
+      if (useVideo) stopVideoScreen();
       window.clearTimeout(slowTimer);
       window.clearTimeout(hintTimer);
       window.clearTimeout(pointerTimer);
-      window.removeEventListener("mousemove", pointerMoved);
+      window.removeEventListener(moveEvent, pointerMoved);
       document.documentElement.classList.remove("on-screen");
     };
   }, []);
@@ -89,6 +120,23 @@ export function ScreenPage() {
   useEffect(() => {
     document.title = state?.board ? `${state.board.name} · NoticeBrd` : "NoticeBrd screen";
   }, [state?.board?.name]);
+
+  const message = state?.paired ? state.message : null;
+  useEffect(() => {
+    if (!useVideo) return;
+    showOnVideo(message);
+    // Unpaired: the pairing code is a page, so out of the video to show it.
+    if (state && !state.paired) {
+      exitVideoFullscreen();
+      leftVideo.current = false;
+    }
+  }, [state]);
+
+  const goVideoFullscreen = () => {
+    leftVideo.current = false;
+    hideRefresh();
+    enterVideoFullscreen();
+  };
 
   const showPanel = () => {
     setPanel(true);
@@ -104,8 +152,12 @@ export function ScreenPage() {
   const onTap = () => {
     // The wake lock first: it is asked for there and then, while the tap still counts.
     nudge();
-    enterFullscreen();
     setFullscreenHint(false);
+    if (!useVideo) enterFullscreen();
+    // On iPhone and iPad the first tap goes straight into the video. Taps
+    // after someone has swiped out of it are for the page: Refresh and the
+    // panel, and Full screen to go back in.
+    else if (state?.paired && !leftVideo.current && !panel && enterVideoFullscreen()) return;
     if (panel) {
       // A tap outside the panel closes it.
       setPanel(false);
@@ -135,7 +187,7 @@ export function ScreenPage() {
     []
   );
 
-  const message = state?.paired ? state.message : null;
+  const videoOffer = useVideo && !!state?.paired && !videoFull;
 
   return (
     <div class={`screen${panel ? " with-panel" : ""}${pointerIdle && !panel ? " pointer-idle" : ""}`} onClick={onTap}>
@@ -144,23 +196,49 @@ export function ScreenPage() {
       {!state && slow && <p class="screen-note">{connection === "offline" ? "Can't reach NoticeBrd. Retrying…" : "Connecting…"}</p>}
       {wake.needsTap && !panel && (
         // The one thing a black screen shows: without this tap, it will sleep.
-        <div class={`tap-prompt${message ? " over-message" : ""}`}>
-          <p>Tap anywhere to keep this screen awake</p>
-          <p class="tap-why">This browser asks for a tap each time NoticeBrd opens.</p>
+        // Over a message or a pairing code it sits in a band at the foot, clear of them.
+        <div class={`tap-prompt${message || (state && !state.paired) ? " over-message" : ""}`}>
+          {videoOffer && !leftVideo.current ? (
+            <>
+              <p>Tap anywhere to start</p>
+              <p class="tap-why">The screen then goes full screen and stays awake. This browser asks for a tap each time NoticeBrd opens.</p>
+            </>
+          ) : (
+            <>
+              <p>Tap anywhere to keep this screen awake</p>
+              <p class="tap-why">This browser asks for a tap each time NoticeBrd opens.</p>
+            </>
+          )}
         </div>
       )}
-      {fullscreenHint && !wake.needsTap && !panel && <p class="fullscreen-hint">Tap anywhere for full screen</p>}
+      {fullscreenHint && !wake.needsTap && !panel && (useVideo ? videoOffer : true) && (
+        <p class="fullscreen-hint">Tap anywhere for full screen</p>
+      )}
       {refreshShown && !panel && (
-        <button
-          class="screen-refresh"
-          onClick={(e) => {
-            e.stopPropagation();
-            void refreshApp();
-          }}
-        >
-          <Icon name="refresh" />
-          <span>Refresh</span>
-        </button>
+        <div class="screen-corner">
+          {videoOffer && (
+            <button
+              class="screen-refresh"
+              onClick={(e) => {
+                e.stopPropagation();
+                goVideoFullscreen();
+              }}
+            >
+              <Icon name="fullscreen" />
+              <span>Full screen</span>
+            </button>
+          )}
+          <button
+            class="screen-refresh"
+            onClick={(e) => {
+              e.stopPropagation();
+              void refreshApp();
+            }}
+          >
+            <Icon name="refresh" />
+            <span>Refresh</span>
+          </button>
+        </div>
       )}
       {panel && (
         <ScreenPanel
@@ -168,6 +246,7 @@ export function ScreenPage() {
           connection={connection}
           wake={wake}
           updateReady={updateReady}
+          onVideoFullscreen={videoOffer ? goVideoFullscreen : undefined}
           onKeep={showPanel}
           onUnpaired={(s) => {
             setState(s);
@@ -208,6 +287,7 @@ function ScreenPanel({
   connection,
   wake,
   updateReady,
+  onVideoFullscreen,
   onKeep,
   onUnpaired,
 }: {
@@ -215,6 +295,8 @@ function ScreenPanel({
   connection: Connection;
   wake: WakeState;
   updateReady: boolean;
+  /** iPhone and iPad: full screen as a video. */
+  onVideoFullscreen?: () => void;
   onKeep: () => void;
   onUnpaired: (s: ScreenState) => void;
 }) {
@@ -276,7 +358,19 @@ function ScreenPanel({
       )}
       {updateReady && <p class="panel-tip">A newer NoticeBrd is ready. It loads the next time the app opens, or now with Update.</p>}
       <div class="screen-panel-actions">
-        {canFullscreen() && (isFullscreen() || !windowIsFullscreen()) && (
+        {onVideoFullscreen && (
+          <button
+            class="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onVideoFullscreen();
+            }}
+          >
+            <Icon name="fullscreen" />
+            <span>Full screen</span>
+          </button>
+        )}
+        {!onVideoFullscreen && canFullscreen() && (isFullscreen() || !windowIsFullscreen()) && (
           <button
             class="button"
             onClick={(e) => {
