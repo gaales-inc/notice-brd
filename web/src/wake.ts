@@ -1,4 +1,4 @@
-import { detectPlatform, iosVersion } from "./device";
+import { detectPlatform, inNativeApp, iosVersion } from "./device";
 import { isStandalone } from "./install";
 
 /**
@@ -20,6 +20,9 @@ import { isStandalone } from "./install";
  * plays instead: a playing video keeps any phone awake. It, too, can only
  * start from a tap.
  *
+ * Inside the NoticeBrd app for iPhone and iPad (ios/) none of this is needed:
+ * the app keeps the device awake itself, so no tap, lock or video.
+ *
  * What the screen reports is steadied: a lock or video that drops and comes
  * straight back (a lock being re-taken, the video being restarted) doesn't
  * count, only one that stays down for GRACE_MS. Without that, an iPad could
@@ -34,7 +37,7 @@ const QUICK_RELEASE_MS = 15_000;
 export interface WakeState {
   /** The screen is being kept on. */
   active: boolean;
-  method: "lock" | "video" | null;
+  method: "lock" | "video" | "app" | null;
   /** Keeping it on needs a tap on the screen first. */
   needsTap: boolean;
   /** Nothing this browser offers can keep it on; the device's own settings must. */
@@ -47,6 +50,7 @@ interface Sentinel extends EventTarget {
 }
 
 const nav = navigator as Navigator & { wakeLock?: { request(type: "screen"): Promise<Sentinel> } };
+const appKeepsAwake = inNativeApp();
 const hasLock = !!nav.wakeLock;
 
 let wanted = false;
@@ -99,6 +103,10 @@ function holding(): boolean {
 }
 
 export function wakeState(): WakeState {
+  if (appKeepsAwake) {
+    const on = wanted && visible();
+    return { active: on, method: on ? "app" : null, needsTap: false, unsupported: false };
+  }
   const video = needsVideo();
   const now = Date.now();
   if (wanted && holding()) lastActiveAt = now;
@@ -265,7 +273,7 @@ function scheduleRetry(ms: number) {
 }
 
 function acquire() {
-  if (!wanted || !visible()) return emit();
+  if (!wanted || !visible() || appKeepsAwake) return emit();
   takeLock();
   // Worth a try even if it was refused before: a video once started by a tap
   // can usually start again without one.
@@ -291,7 +299,7 @@ export function letSleep() {
 
 /** Call from every tap on the screen: Safari only grants the lock, and any browser a video, after one. */
 export function nudge() {
-  if (!wanted) return;
+  if (!wanted || appKeepsAwake) return;
   lastTapAt = Date.now();
   // The video can only start here, inside the tap. Start it whenever the lock
   // isn't holding yet: if the lock then comes through, the video stops again.
