@@ -1214,12 +1214,23 @@ textarea {
   touch-action: manipulation;
 }
 
-.screen-refresh {
+/*
+ * A tap's buttons, top right: Refresh, and on iPhone and iPad Full screen.
+ * Their own layer, above the message: Safari otherwise draws the message's
+ * moving layer over them.
+ */
+.screen-corner {
   position: absolute;
   top: 16px;
   right: 16px;
   top: calc(16px + env(safe-area-inset-top));
   right: calc(16px + env(safe-area-inset-right));
+  z-index: 5;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+}
+
+.screen-refresh {
   display: inline-flex;
   align-items: center;
   min-height: 48px;
@@ -1236,6 +1247,10 @@ textarea {
 
 .screen-refresh .icon {
   margin-right: 8px;
+}
+
+.screen-refresh + .screen-refresh {
+  margin-left: 10px;
 }
 
 .marquee {
