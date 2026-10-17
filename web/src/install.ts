@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { inNativeApp } from "./device";
 
 /**
  * Installing NoticeBrd as an app, as Gula does.
@@ -21,6 +22,7 @@ const notify = () => listeners.forEach((l) => l());
 
 export function isStandalone(): boolean {
   return (
+    inNativeApp() ||
     (typeof window.matchMedia === "function" &&
       (window.matchMedia("(display-mode: standalone)").matches || window.matchMedia("(display-mode: fullscreen)").matches)) ||
     // iOS Safari's own flag for a page opened from the home screen.

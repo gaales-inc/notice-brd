@@ -1,4 +1,11 @@
 /**
+ * Inside the NoticeBrd app for iPhone and iPad (ios/), which shows the screen
+ * page full screen, without the status bar, and keeps the device awake itself.
+ * It says so in its user agent.
+ */
+export const inNativeApp = (ua = navigator.userAgent) => /\bNoticeBrdApp\//.test(ua);
+
+/**
  * A short name for this device and browser — "iPad · Safari" — which the
  * dashboard shows until someone names the screen.
  */
@@ -15,7 +22,8 @@ export function describeDevice(ua = navigator.userAgent, touchPoints = navigator
   else if (/Linux/.test(ua)) device = "Linux PC";
 
   let browser = "";
-  if (/Edg(e|A|iOS)?\//.test(ua)) browser = "Edge";
+  if (inNativeApp(ua)) browser = "NoticeBrd app";
+  else if (/Edg(e|A|iOS)?\//.test(ua)) browser = "Edge";
   else if (/SamsungBrowser\//.test(ua)) browser = "Samsung Internet";
   else if (/OPR\/|Opera/.test(ua)) browser = "Opera";
   else if (/Firefox\/|FxiOS\//.test(ua)) browser = "Firefox";

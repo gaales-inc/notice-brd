@@ -4,7 +4,7 @@ NoticeBrd — a black screen with a message running across it, run from a dashbo
 
 Any browser can be a screen: a TV, an old tablet by the door, a phone in a shop window. Open `/screen` on it and it shows a six-character code; enter the code in the dashboard and the screen is on your board. From then on the dashboard decides what it shows.
 
-- **The screen** is black, always. A message broadcast to it shows in one of three ways, chosen per message: **scrolling across** right to left, **scrolling up** like credits, or **all at once**, centred and as large as fits. Each has its colour and size; the scrolls have a speed. With nothing broadcasting it is completely black — no clock, no logo — so an OLED panel lights no pixels. Either way the screen is kept awake. It goes **full screen** like a video — no browser bars, and no status or navigation bar where the system allows it — on its first tap (an installed app on Android is full screen from the start), and a still mouse pointer hides. iPhone and iPad keep their status bar whatever a web page does ([WebKit bug 264220](https://bugs.webkit.org/show_bug.cgi?id=264220)); there the screen is black underneath it. A tap also shows a **Refresh** button in the corner for three seconds — a home-screen app on iPhone and iPad has no pull-to-refresh. Three quick taps open the screen's panel: which board and screen it is, whether it's connected and kept awake, and buttons for full screen, refresh, installing, the dashboard and unpairing.
+- **The screen** is black, always. A message broadcast to it shows in one of three ways, chosen per message: **scrolling across** right to left, **scrolling up** like credits, or **all at once**, centred and as large as fits. Each has its colour and size; the scrolls have a speed. With nothing broadcasting it is completely black — no clock, no logo — so an OLED panel lights no pixels. Either way the screen is kept awake. It goes **full screen** like a video — no browser bars, and no status or navigation bar where the system allows it — on its first tap (an installed app on Android is full screen from the start), and a still mouse pointer hides. iPhone and iPad keep their status bar whatever a web page does ([WebKit bug 264220](https://bugs.webkit.org/show_bug.cgi?id=264220)); there the screen is black underneath it — or use the [NoticeBrd app for iPad](#ipad-app), which hides it. A tap also shows a **Refresh** button in the corner for three seconds — a home-screen app on iPhone and iPad has no pull-to-refresh. Three quick taps open the screen's panel: which board and screen it is, whether it's connected and kept awake, and buttons for full screen, refresh, installing, the dashboard and unpairing.
 - **The dashboard** (`/dashboard`) needs a verification code sent to the board owner's or a collaborator's email — no passwords. It holds a board's messages, its screens and its people. Broadcasting a message picks the screens it goes to; each screen shows one message at a time, so broadcasting on a screen replaces whatever it showed. A message on air shows which screens it is on, each with its live status, and every screen shows whether it is **Awake** (board open, screen kept on), **Open, may sleep** (board open, but the device can still turn its screen off), or **Offline** (with when it was last seen). Battery-powered screens show their **battery level** too — red at 20% or below when not charging, green with a bolt while charging, faded when it's the last reading from a screen gone offline — and the board warns when an open screen runs low. All of it updates live.
 - **Calendars.** A board can follow calendar feeds (Google, Outlook / Microsoft 365, iCloud — their private iCal address). A message set to *show during meetings* goes on its screens by itself while a meeting with a call link (Meet, Zoom, Teams, Webex, Whereby, Jitsi, FaceTime, Chime, GoTo, BlueJeans, Skype, Slack huddles, RingCentral) is on, and comes off when the meeting ends; each screen then goes back to whatever it was showing. "In a meeting" on an office door, say.
 - **Schedules.** A message can also be scheduled for set times of its own — once (from one moment to another) or every week (on chosen days, between two times of day, overnight or all day) — on all the board's screens or chosen ones. It comes on at each time and goes off at its end, and each screen goes back to what it was showing, just as with meetings. "Back at 1:30" over lunch on weekdays, or "Closed for the holiday" on the 24th.
@@ -97,6 +97,27 @@ npm run dev            # API on :3000, the web app with hot reload on http://loc
 ```
 
 Or build and serve it the way production does: `npm run build && PGLITE_DIR=.data MAILR_DEV_CONSOLE=1 WEB_DIR=dist/web node dist/server/server/index.js`. The schema is created on startup (`server/schema.ts`), idempotently.
+
+## iPad app
+
+`ios/` is a small app for iPhone and iPad that shows the screen page (`https://noticebrd.gaales.com/screen`) the way a web page on iOS can't:
+
+- no status bar and no home indicator — black edge to edge;
+- the device never locks while NoticeBrd is in front, with no "tap to keep awake" first;
+- a first swipe at an edge is ignored, so a passer-by can't pull down Control Center or leave the app with one stray swipe.
+
+Everything else is the web page's — pairing, messages, the panel (three taps). The page knows it's inside the app from `NoticeBrdApp/` in its user agent (`web/src/device.ts`), so it skips the wake lock and the tap prompt, and the dashboard names the screen "iPad · NoticeBrd app". If NoticeBrd can't be reached when it opens, it says so and tries again every 10 seconds; if iOS ends the page to free memory, it loads it again.
+
+**Putting it on an iPad** (needs a Mac with Xcode, and the iPad connected by cable the first time):
+
+1. Open `ios/NoticeBrd.xcodeproj` in Xcode.
+2. Select the NoticeBrd target → **Signing & Capabilities** → choose your **Team** (sign in with your Apple ID under Xcode → Settings → Accounts if none is listed). If Xcode says the bundle identifier is taken, change `com.gaales.noticebrd` to one of your own.
+3. On the iPad, turn on **Settings → Privacy & Security → Developer Mode** (it restarts).
+4. Pick the iPad as the run destination and press **Run**. The first time, trust the developer on the iPad: **Settings → General → VPN & Device Management**.
+
+With a free Apple ID the app stops opening after 7 days and has to be run from Xcode again. A paid Apple Developer Program membership lets it last a year, or go out through TestFlight or the App Store — that needs your developer account, so it's left for you to set up.
+
+For development, point it at a NoticeBrd running on your Mac with the launch argument `-NoticeBrdURL http://localhost:3000/screen` (Xcode: Product → Scheme → Edit Scheme → Run → Arguments). The project is generated from `ios/project.yml` with [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`cd ios && xcodegen generate`); the generated project is committed, so Xcode alone is enough to build it.
 
 ## Deployment
 
