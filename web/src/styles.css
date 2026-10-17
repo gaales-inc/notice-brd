@@ -1404,6 +1404,24 @@ textarea {
   font-size: 4vmin;
 }
 
+/* A mouse left still disappears, as over a video. */
+.screen.pointer-idle,
+.screen.pointer-idle * {
+  cursor: none;
+}
+
+.fullscreen-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(5vmin + env(safe-area-inset-bottom));
+  margin: 0;
+  text-align: center;
+  color: #71717a;
+  font-size: 2.8vmin;
+  pointer-events: none;
+}
+
 .tap-prompt {
   position: absolute;
   left: 6%;
