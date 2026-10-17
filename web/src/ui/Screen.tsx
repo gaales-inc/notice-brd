@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { detectPlatform } from "../device";
+import { canFullscreen, enterFullscreen, exitFullscreen, fullscreenOnTap, isFullscreen, onFullscreenChange, windowIsFullscreen } from "../fullscreen";
 import { refreshApp } from "../refresh";
 import { navigate } from "../router";
 import { Connection, ScreenState, cachedState, startScreen, unpairScreen } from "../screenClient";
@@ -7,27 +8,6 @@ import { setMode } from "../storage";
 import { keepAwake, letSleep, nudge, onWakeChange, WakeState, wakeState } from "../wake";
 import { Icon, InstallButton, Logo } from "./common";
 import { Marquee } from "./Marquee";
-
-type FullscreenDoc = Document & { webkitFullscreenElement?: Element; webkitExitFullscreen?: () => void };
-type FullscreenEl = HTMLElement & { webkitRequestFullscreen?: () => void };
-
-const canFullscreen = () => {
-  const el = document.documentElement as FullscreenEl;
-  return !!(el.requestFullscreen || el.webkitRequestFullscreen);
-};
-const isFullscreen = () => !!(document.fullscreenElement || (document as FullscreenDoc).webkitFullscreenElement);
-
-function toggleFullscreen() {
-  const doc = document as FullscreenDoc;
-  if (isFullscreen()) {
-    if (doc.exitFullscreen) void doc.exitFullscreen().catch(() => undefined);
-    else doc.webkitExitFullscreen?.();
-    return;
-  }
-  const el = document.documentElement as FullscreenEl;
-  if (el.requestFullscreen) void el.requestFullscreen().catch(() => undefined);
-  else el.webkitRequestFullscreen?.();
-}
 
 function useWake(): WakeState {
   const [state, setState] = useState(wakeState);
@@ -40,15 +20,19 @@ function useWake(): WakeState {
  * or nothing at all — no clock, no logo — so an OLED panel lights no pixels.
  * Either way the screen is kept awake.
  *
- * A tap shows a Refresh button in the corner for three seconds — a home-screen
+ * A tap takes it full screen, where the browser allows (see fullscreen.ts),
+ * and shows a Refresh button in the corner for three seconds — a home-screen
  * app has no other way to reload. Three quick taps open the screen's panel:
  * what it is, how it's doing, and its options. Taps land as clicks straight
  * away (`touch-action: manipulation`), so a triple tap isn't eaten by zoom.
+ * A mouse pointer left still hides, as over a video.
  */
 
 /** Taps further apart than this start counting again. */
 const TAP_GAP_MS = 500;
 const REFRESH_SHOWN_MS = 3_000;
+const POINTER_HIDES_MS = 3_000;
+const FULLSCREEN_HINT_MS = 8_000;
 export function ScreenPage() {
   const [state, setState] = useState<ScreenState | null>(cachedState);
   const [connection, setConnection] = useState<Connection>("connecting");
@@ -56,6 +40,9 @@ export function ScreenPage() {
   const [slow, setSlow] = useState(false);
   const [updateReady, setUpdateReady] = useState(false);
   const [refreshShown, setRefreshShown] = useState(false);
+  const [fullscreenHint, setFullscreenHint] = useState(false);
+  const [pointerIdle, setPointerIdle] = useState(false);
+  const [, setFullscreen] = useState(isFullscreen);
   const hideTimer = useRef<number>();
   const refreshTimer = useRef<number>();
   const taps = useRef({ count: 0, last: 0 });
@@ -67,10 +54,34 @@ export function ScreenPage() {
     keepAwake();
     const stop = startScreen({ onState: setState, onConnection: setConnection, onUpdateReady: () => setUpdateReady(true) });
     const slowTimer = window.setTimeout(() => setSlow(true), 4000);
+
+    const stopWatching = onFullscreenChange(() => setFullscreen(isFullscreen()));
+    // iPhone and iPad already ask for a tap, to keep the screen awake; elsewhere, say what a tap does.
+    let hintTimer: number | undefined;
+    if (fullscreenOnTap() && detectPlatform() !== "ios") {
+      setFullscreenHint(true);
+      hintTimer = window.setTimeout(() => setFullscreenHint(false), FULLSCREEN_HINT_MS);
+    }
+
+    let pointerTimer: number | undefined;
+    const pointerMoved = () => {
+      setPointerIdle(false);
+      window.clearTimeout(pointerTimer);
+      pointerTimer = window.setTimeout(() => setPointerIdle(true), POINTER_HIDES_MS);
+    };
+    pointerMoved();
+    window.addEventListener("mousemove", pointerMoved);
+
     return () => {
       stop();
       letSleep();
+      stopWatching();
+      // Off to the dashboard: that's a page, not a screen.
+      exitFullscreen(false);
       window.clearTimeout(slowTimer);
+      window.clearTimeout(hintTimer);
+      window.clearTimeout(pointerTimer);
+      window.removeEventListener("mousemove", pointerMoved);
       document.documentElement.classList.remove("on-screen");
     };
   }, []);
@@ -91,7 +102,10 @@ export function ScreenPage() {
   };
 
   const onTap = () => {
+    // The wake lock first: it is asked for there and then, while the tap still counts.
     nudge();
+    enterFullscreen();
+    setFullscreenHint(false);
     if (panel) {
       // A tap outside the panel closes it.
       setPanel(false);
@@ -124,7 +138,7 @@ export function ScreenPage() {
   const message = state?.paired ? state.message : null;
 
   return (
-    <div class={`screen${panel ? " with-panel" : ""}`} onClick={onTap}>
+    <div class={`screen${panel ? " with-panel" : ""}${pointerIdle && !panel ? " pointer-idle" : ""}`} onClick={onTap}>
       {message && <Marquee message={message} class="marquee-full" />}
       {state && !state.paired && <Pairing state={state} />}
       {!state && slow && <p class="screen-note">{connection === "offline" ? "Can't reach NoticeBrd. Retrying…" : "Connecting…"}</p>}
@@ -135,6 +149,7 @@ export function ScreenPage() {
           <p class="tap-why">This browser asks for a tap each time NoticeBrd opens.</p>
         </div>
       )}
+      {fullscreenHint && !wake.needsTap && !panel && <p class="fullscreen-hint">Tap anywhere for full screen</p>}
       {refreshShown && !panel && (
         <button
           class="screen-refresh"
@@ -204,7 +219,6 @@ function ScreenPanel({
   onUnpaired: (s: ScreenState) => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [, rerender] = useState(0);
 
   const unpair = async () => {
     if (!window.confirm("Take this screen off the board? It will show a new pair code.")) return;
@@ -262,13 +276,13 @@ function ScreenPanel({
       )}
       {updateReady && <p class="panel-tip">A newer NoticeBrd is ready. It loads the next time the app opens, or now with Update.</p>}
       <div class="screen-panel-actions">
-        {canFullscreen() && (
+        {canFullscreen() && (isFullscreen() || !windowIsFullscreen()) && (
           <button
             class="button"
             onClick={(e) => {
               e.stopPropagation();
-              toggleFullscreen();
-              window.setTimeout(() => rerender((n) => n + 1), 300);
+              if (isFullscreen()) exitFullscreen(true);
+              else enterFullscreen(true);
             }}
           >
             <Icon name="fullscreen" />
