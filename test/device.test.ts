@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeDevice, detectPlatform, inNativeApp, iosVersion } from "../web/src/device";
+import { describeDevice, detectPlatform, iosVersion } from "../web/src/device";
 
 const UA = {
   iphone17:
@@ -13,9 +13,6 @@ const UA = {
   windowsEdge:
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
   macFirefox: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:128.0) Gecko/20100101 Firefox/128.0",
-  // The NoticeBrd app (ios/): WebKit's own user agent with the app's name on the end.
-  ipadApp: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 NoticeBrdApp/1.0",
-  iphoneApp: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 NoticeBrdApp/1.0",
 };
 
 describe("describeDevice", () => {
@@ -28,18 +25,6 @@ describe("describeDevice", () => {
     expect(describeDevice(UA.tizen, 0)).toBe("TV · Safari");
     expect(describeDevice(UA.windowsEdge, 0)).toBe("Windows PC · Edge");
     expect(describeDevice(UA.macFirefox, 0)).toBe("Mac · Firefox");
-    expect(describeDevice(UA.ipadApp, 5)).toBe("iPad · NoticeBrd app");
-    expect(describeDevice(UA.iphoneApp, 5)).toBe("iPhone · NoticeBrd app");
-  });
-});
-
-describe("inNativeApp", () => {
-  it("tells the NoticeBrd app from Safari", () => {
-    expect(inNativeApp(UA.ipadApp)).toBe(true);
-    expect(inNativeApp(UA.iphoneApp)).toBe(true);
-    expect(inNativeApp(UA.ipadDesktop)).toBe(false);
-    expect(inNativeApp(UA.iphone17)).toBe(false);
-    expect(detectPlatform(UA.ipadApp, 5)).toBe("ios");
   });
 });
 

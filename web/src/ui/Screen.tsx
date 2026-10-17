@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { detectPlatform, inNativeApp } from "../device";
+import { detectPlatform } from "../device";
 import { canFullscreen, enterFullscreen, exitFullscreen, fullscreenOnTap, isFullscreen, onFullscreenChange, windowIsFullscreen } from "../fullscreen";
 import { refreshApp } from "../refresh";
 import { navigate } from "../router";
@@ -238,8 +238,7 @@ function ScreenPanel({
       ? "Tap the screen to keep it awake"
       : "This browser can't keep the screen awake — turn off auto-lock in the device's settings";
   }
-  // The NoticeBrd app keeps the device awake itself: no tap, no Auto-Lock to change.
-  const apple = (detectPlatform() === "ios" || detectPlatform() === "mac-safari") && !inNativeApp();
+  const apple = detectPlatform() === "ios" || detectPlatform() === "mac-safari";
 
   return (
     <div
